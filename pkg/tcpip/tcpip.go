@@ -606,6 +606,10 @@ const (
 	// multicast packets sent over a non-loopback interface will be looped back.
 	MulticastLoopOption
 
+	// NoChecksumOption is used by SetSockOpt/GetSockOpt to specify whether
+	// UDP checksum is disabled for this socket.
+	NoChecksumOption
+
 	// PasscredOption is used by SetSockOpt/GetSockOpt to specify whether
 	// SCM_CREDENTIALS socket control messages are enabled.
 	//
