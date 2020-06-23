@@ -72,7 +72,7 @@ TEST(MknodTest, MknodOnExistingPathFails) {
 TEST(MknodTest, UnimplementedTypesReturnError) {
   const std::string path = NewTempAbsPath();
 
-  if (IsRunningOnGvisor()) {
+  if (IsRunningWithVFS1()) {
     ASSERT_THAT(mknod(path.c_str(), S_IFSOCK, 0),
                 SyscallFailsWithErrno(EOPNOTSUPP));
   }

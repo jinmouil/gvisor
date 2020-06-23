@@ -104,7 +104,7 @@ func mkdirat(t *kernel.Task, dirfd int32, addr usermem.Addr, mode uint) error {
 // Mknod implements Linux syscall mknod(2).
 func Mknod(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
-	mode := args[1].ModeT()
+	mode := linux.FileMode(args[1].ModeT())
 	dev := args[2].Uint()
 	return 0, nil, mknodat(t, linux.AT_FDCWD, addr, mode, dev)
 }
@@ -113,12 +113,12 @@ func Mknod(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 func Mknodat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	addr := args[1].Pointer()
-	mode := args[2].ModeT()
+	mode := linux.FileMode(args[2].ModeT())
 	dev := args[3].Uint()
 	return 0, nil, mknodat(t, dirfd, addr, mode, dev)
 }
 
-func mknodat(t *kernel.Task, dirfd int32, addr usermem.Addr, mode uint, dev uint32) error {
+func mknodat(t *kernel.Task, dirfd int32, addr usermem.Addr, mode linux.FileMode, dev uint32) error {
 	path, err := copyInPath(t, addr)
 	if err != nil {
 		return err
@@ -128,9 +128,14 @@ func mknodat(t *kernel.Task, dirfd int32, addr usermem.Addr, mode uint, dev uint
 		return err
 	}
 	defer tpop.Release()
+
+	// "Zero file type is equivalent to type S_IFREG." - mknod(2)
+	if mode == 0 {
+		mode = linux.ModeRegular
+	}
 	major, minor := linux.DecodeDeviceID(dev)
 	return t.Kernel().VFS().MknodAt(t, t.Credentials(), &tpop.pop, &vfs.MknodOptions{
-		Mode:     linux.FileMode(mode &^ t.FSContext().Umask()),
+		Mode:     mode &^ linux.FileMode(t.FSContext().Umask()),
 		DevMajor: uint32(major),
 		DevMinor: minor,
 	})

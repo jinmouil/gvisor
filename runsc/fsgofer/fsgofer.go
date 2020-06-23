@@ -909,7 +909,20 @@ func (l *localFile) Link(target p9.File, newName string) error {
 // Mknod implements p9.File.
 //
 // Not implemented.
-func (*localFile) Mknod(_ string, _ p9.FileMode, _ uint32, _ uint32, _ p9.UID, _ p9.GID) (p9.QID, error) {
+func (l *localFile) Mknod(name string, mode p9.FileMode, _ uint32, _ uint32, uid p9.UID, gid p9.GID) (p9.QID, error) {
+	// Allow mknod(2) to create regular files in fsgofer.
+	if mode&p9.FileModeMask == p9.ModeRegular {
+		fd, _, qid, _, err := l.Create(name, p9.ReadWrite, mode, uid, gid)
+		if fd != nil {
+			fd.Close()
+		}
+		return qid, err
+	}
+
+	if _, err := os.Stat(path.Join(l.hostPath, name)); err == nil {
+		return p9.QID{}, syscall.EEXIST
+	}
+
 	// From mknod(2) man page:
 	// "EPERM: [...] if the filesystem containing pathname does not support
 	// the type of node requested."
