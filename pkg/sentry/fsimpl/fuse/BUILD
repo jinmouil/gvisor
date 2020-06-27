@@ -21,6 +21,7 @@ go_library(
         "connection.go",
         "dev.go",
         "fusefs.go",
+        "init.go",
         "register.go",
         "request_list.go",
     ],
@@ -46,7 +47,33 @@ go_library(
 go_test(
     name = "dev_test",
     size = "small",
-    srcs = ["dev_test.go"],
+    srcs = [
+        "dev_test.go",
+        "test_utils.go"
+        ],
+    library = ":fuse",
+    deps = [
+        "//pkg/abi/linux",
+        "//pkg/sentry/fsimpl/testutil",
+        "//pkg/sentry/fsimpl/tmpfs",
+        "//pkg/sentry/kernel",
+        "//pkg/sentry/kernel/auth",
+        "//pkg/sentry/vfs",
+        "//pkg/syserror",
+        "//pkg/usermem",
+        "//pkg/waiter",
+        "//tools/go_marshal/marshal",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
+go_test(
+    name = "connection_test",
+    size = "small",
+    srcs = [
+        "connection_test.go",
+        "test_utils.go"
+        ],
     library = ":fuse",
     deps = [
         "//pkg/abi/linux",
