@@ -16,6 +16,9 @@ package fuse
 
 import (
 	"fmt"
+	"sync"
+	"syscall"
+
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
@@ -23,7 +26,6 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/tools/go_marshal/marshal"
-	"syscall"
 )
 
 // TODO: configure this properly.
@@ -33,6 +35,18 @@ var (
 	// Ordinary requests have even IDs, while interrupts IDs are odd.
 	FUSE_INIT_REQ_BIT uint64 = 1
 	FUSE_REQ_ID_STEP  uint64 = 2
+)
+
+const (
+	// FUSE_DEFAULT_MAX_BACKGROUND is the default maximum number of outstanding background requests.
+	FUSE_DEFAULT_MAX_BACKGROUND = 12
+
+	// FUSE_DEFAULT_CONGESTION_THRESHOLD is the default congestion threshold,
+	// and is 75% of the default maximum.
+	FUSE_DEFAULT_CONGESTION_THRESHOLD = (FUSE_DEFAULT_MAX_BACKGROUND * 3 / 4)
+
+	// FUSE_DEFAULT_MAX_PAGES_PER_REQ is the maximum number of pages that can be used in a single read request.
+	FUSE_DEFAULT_MAX_PAGES_PER_REQ = 32
 )
 
 // Request represents a FUSE operation request that hasn't been sent to the
@@ -61,6 +75,212 @@ type FutureResponse struct {
 // Connection is the struct by which the sentry communicates with the FUSE server daemon.
 type Connection struct {
 	fd *DeviceFD
+
+	// MaxRead size in bytes.
+	MaxRead uint32
+
+	// MaxWrite size in bytes.
+	MaxWrite uint32
+
+	// MaxPages is the maximum number of pages for a single request to use.
+	MaxPages uint16
+
+	// NumberBackground is the number of requests in background.
+	NumBackground uint16
+
+	// CongestionThreshold for the number of background requests.
+	CongestionThreshold uint16
+
+	// MaxBackground is the maximum number of outstanding background requests.
+	MaxBackground uint16
+
+	// NumActiveBackground is the number of requests in background and currently queued for userspace.
+	NumActiveBackground uint16
+
+	// NumWating is the number of requests waiting for completion.
+	NumWaiting uint32
+
+	// Minor version negotiated.
+	Minor uint32
+
+	// TODO: BgQuque
+	// some queue for background queued requests.
+
+	// BgLock protects:
+	// MaxBackground, CongestionThreshold, NumBackground,
+	// NumActiveBackground, BgQueue, Blocked.
+	BgLock sync.Mutex
+
+	// Initialized if INIT reply has been received.
+	// Until it's set, suspend sending FUSE requests.
+	Initialized bool
+
+	// protects Initialized.
+	initializedLock sync.Mutex
+
+	// Blocked when:
+	//   before the INIT reply is received (Initialized == false),
+	//   if there are too many outstading backgrounds requests (NumBackground == MaxBackground).
+	// TODO: use a channel to block.
+	Blocked bool
+
+	// Connected if connection established.
+	// Unset when:
+	//   umount,
+	//   connection abort,
+	//   device release.
+	Connected bool
+
+	// Aborted via sysfs.
+	Aborted bool
+
+	// ConnError if connection failed (version mismatch).
+	// Only set in INIT,
+	// before any other request,
+	// never unset.
+	// Cannot race with other flags.
+	ConnError bool
+
+	// ConnInit if connection successful.
+	// Only set in INIT.
+	ConnInit bool
+
+	// AsyncRead if read pages asynchronously.
+	// Only set in INIT.
+	AsyncRead bool
+
+	// AbortErr is true if need to return an unique read error after abort.
+	// Only set in INIT.
+	AbortErr bool
+
+	// AtomicOTrunc is true when FUSE does not send a separate SETATTR request
+	// before open with O_TRUNC flag.
+	AtomicOTrunc bool
+
+	// ExportSupport is true if the daemon filesystem supports NFS exporting.
+	// Only set in INIT.
+	ExportSupport bool
+
+	// WritebackCache is true for write-back cache policy,
+	// false for write-through policy.
+	WritebackCache bool
+
+	// ParallelDirops is true if allowing lookup and readdir in parallel,
+	// false if serialized.
+	ParallelDirops bool
+
+	// HandleKillpriv if the daemon filesystem handles killing suid/sgid/cap on write/chown/trunc.
+	HandleKillpriv bool
+
+	// CacheSymlinks if need to cache READLINK responses in page cache.
+	CacheSymlinks bool
+
+	/* Setting races on the following optimization-purpose flags are safe */
+
+	// NoOpen if open/release not implemented by the filesystem.
+	NoOpen bool
+
+	// NoOpendir if opendir/releasedir not implemented by the filesystem.
+	NoOpendir bool
+
+	// NoFsync if fsync not implemented by the filesystem.
+	NoFsync bool
+
+	// NoFsyncdir if fsyncdir not implemented by the filesystem.
+	NoFsyncdir bool
+
+	// NoFlush if flush not implemented by the filesystem.
+	NoFlush bool
+
+	// NoSetxattr if setxattr not implemented by the filesystem.
+	NoSetxattr bool
+
+	// NoGetxattr if getxattr not implemented by the filesystem.
+	NoGetxattr bool
+
+	// NoListxattr if listxattr not implemented by the filesystem.
+	NoListxattr bool
+
+	// NoRemovexattr if removexattr not implemented by the filesystem.
+	NoRemovexattr bool
+
+	// NoLock if posix file locking primitives not implemented by the filesystem.
+	NoLock bool
+
+	// NoAccess if access not implemented by the filesystem.
+	NoAccess bool
+
+	// NoCreate if create not implemented by the filesystem.
+	NoCreate bool
+
+	// NoInterrupt if interrupt not implemented by the filesystem.
+	NoInterrupt bool
+
+	// NoBmap if bmap not implemented by the filesystem.
+	NoBmap bool
+
+	// NoPoll if poll not implemented by the filesystem.
+	NoPoll bool
+
+	// BigWrites if doing multi-page cached writes.
+	BigWrites bool
+
+	// DontMask don't apply umask to creation modes.
+	DontMask bool
+
+	// NoFLock if BSD file locking primitives not implemented by the filesystem.
+	NoFLock bool
+
+	// NoFallocate if fallocate not implemented by the filesystem.
+	NoFallocate bool
+
+	// NoRename2 if rename with flags not implemented by the filesystem.
+	NoRename2 bool
+
+	// AutoInvalData use enhanced/automatic page cache invalidation.
+	AutoInvalData bool
+
+	// ExplicitInvalData Filesystem is fully reponsible for page cache invalidation.
+	ExplicitInvalData bool
+
+	// DoReaddirplus if the filesystem supports readdirplus.
+	DoReaddirplus bool
+
+	// ReaddirplusAuto if the filesystem wants adaptive readdirplus.
+	ReaddirplusAuto bool
+
+	// AsyncDio if the filesystem supports asynchronous direct-IO submission.
+	AsyncDio bool
+
+	// NoLseek if lseek() not implemented by the filesystem.
+	NoLseek bool
+
+	// PosixACL if the filesystem supports posix acls.
+	PosixACL bool
+
+	// DefaultPermissions if to check permissions based on the file mode.
+	DefaultPermissions bool
+
+	// AllowOther user who is not the mounter to access the filesystem.
+	AllowOther bool
+
+	// NoCopyFileRange if the filesystem not supports copy_file_range.
+	NoCopyFileRange bool
+
+	// Destroy request will be sent.
+	Destroy bool
+
+	// DeleteStable dentries.
+	DeleteStable bool
+
+	// NoControl if not creating entry in fusectl fs.
+	NonControl bool
+
+	// NoForceUmount if not allowing MNT_FORCE umount.
+	NoForceUmount bool
+
+	// NoMountOptions if not showing mount options.
+	NoMountOptions bool
 }
 
 // NewFUSEConnection creates a FUSE connection to fd
@@ -80,8 +300,32 @@ func NewFUSEConnection(ctx context.Context, fd *vfs.FileDescription) (*Connectio
 	fuseFD.readCursor = 0
 
 	return &Connection{
-		fd: fuseFD,
+		fd:                  fuseFD,
+		NumWaiting:          0,
+		MaxBackground:       FUSE_DEFAULT_MAX_BACKGROUND,
+		CongestionThreshold: FUSE_DEFAULT_CONGESTION_THRESHOLD,
+		MaxPages:            FUSE_DEFAULT_MAX_PAGES_PER_REQ,
+		Blocked:             false,
+		Initialized:         false,
+		Connected:           true,
 	}, nil
+}
+
+// Atomically set the connection as initialized.
+func (conn *Connection) setInitialized() {
+	conn.initializedLock.Lock()
+	defer conn.initializedLock.Unlock()
+
+	conn.Initialized = true
+}
+
+// Atomically check if the connection is initialized.
+// pairs with setInitialized().
+func (conn *Connection) isInitialized() bool {
+	conn.initializedLock.Lock()
+	defer conn.initializedLock.Unlock()
+
+	return conn.Initialized
 }
 
 // NewRequest creates a new request that can be sent to the FUSE server.
