@@ -62,6 +62,10 @@ type DeviceFD struct {
 	// to notify the caller of a completed response.
 	completions map[linux.FUSEOpID]*FutureResponse
 
+	// requestKind is a map to quickly identify the kind of operation based on the
+	// opID.
+	requestKind map[linux.FUSEOpID]linux.FUSEOpcode
+
 	readCursor  uint32
 	writeCursor uint32
 
@@ -80,6 +84,9 @@ type DeviceFD struct {
 	// (inbound requests to the filesystem) block if there are too many unprocessed
 	// in-flight requests.
 	waitCh chan struct{}
+
+	// fs is the FUSE filesystem that this FD is being used for.
+	fs *filesystem
 }
 
 // Release implements vfs.FileDescriptionImpl.Release.
@@ -247,6 +254,11 @@ func (fd *DeviceFD) writeLocked(ctx context.Context, src usermem.IOSequence, opt
 	}
 
 	if fd.writeCursorFR != nil {
+		// See if the running task need to perform some action before returning.
+		if err := fd.noReceiverAction(ctx, fd.writeCursorFR); err != nil {
+			return 0, err
+		}
+
 		close(fd.writeCursorFR.ch)
 		fd.writeCursorFR = nil
 		fd.writeCursor = 0
@@ -274,4 +286,22 @@ func (fd *DeviceFD) Seek(ctx context.Context, offset int64, whence int32) (int64
 	}
 
 	return 0, syserror.ENOSYS
+}
+
+// noReceiverAction has the calling kernel.Task do some action if its known that no
+// reciever is going to be waiting on the future channel. This is to be used by:
+// FUSE_INIT.
+func (fd *DeviceFD) noReceiverAction(ctx context.Context, fut *FutureResponse) error {
+	opCode, ok := fd.requestKind[fut.hdr.Unique]
+	if !ok {
+		// Server sent us a response for a request we don't know about.
+		return syserror.EINVAL
+	}
+	delete(fd.requestKind, fut.hdr.Unique)
+
+	if opCode == linux.FUSE_INIT {
+		// TODO: process init response here.
+	}
+
+	return nil
 }

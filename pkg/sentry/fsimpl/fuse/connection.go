@@ -63,7 +63,7 @@ type Connection struct {
 }
 
 // NewFUSEConnection creates a FUSE connection to fd
-func NewFUSEConnection(ctx context.Context, fd *vfs.FileDescription) *Connection {
+func NewFUSEConnection(ctx context.Context, fd *vfs.FileDescription, fs *filesystem) error {
 	// Mark the device as ready so it can be used. /dev/fuse can only be used if the FD was used to
 	// mount a FUSE filesystem.
 	fuseFD := fd.Impl().(*DeviceFD)
@@ -73,11 +73,16 @@ func NewFUSEConnection(ctx context.Context, fd *vfs.FileDescription) *Connection
 	hdrLen := uint32((*linux.FUSEHeaderOut)(nil).SizeBytes())
 	fuseFD.writeBuf = make([]byte, hdrLen)
 	fuseFD.completions = make(map[linux.FUSEOpID]*FutureResponse)
+	fuseFD.requestKind = make(map[linux.FUSEOpID]linux.FUSEOpcode)
 	fuseFD.waitCh = make(chan struct{}, MaxInFlightRequests)
 	fuseFD.writeCursor = 0
 	fuseFD.readCursor = 0
 
-	return &Connection{fd: fuseFD}
+	conn := &Connection{
+		fd:fuseFD,
+	}
+	fs.fuseConn = conn
+	return nil
 }
 
 // NewRequest creates a new request that can be sent to the FUSE server.
@@ -119,28 +124,6 @@ func (conn *Connection) Call(t *kernel.Task, r *Request) (*Response, error) {
 	return fut.resolve(t)
 }
 
-// CallTaskNonBlock makes a request to the server and blocks the invoking
-// goroutine until a server responds with a response. Doesn't block
-// a kernel.Task.
-func (conn *Connection) CallTaskNonBlock(r *Request) (*Response, error) {
-	fut, err := conn.callFuture(r)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: Consider allowing a timeout to unblock the process. Unclear if this
-	// is required yet.
-	select {
-	case <-fut.ch:
-	}
-
-	// A response is ready. Resolve and return it.
-	return &Response{
-		hdr:  *fut.hdr,
-		data: fut.data,
-	}, nil
-}
-
 // callFuture makes a request to the server and returns a future response.
 // Call resolve() when the response needs to be fulfilled.
 func (conn *Connection) callFuture(r *Request) (*FutureResponse, error) {
@@ -148,6 +131,7 @@ func (conn *Connection) callFuture(r *Request) (*FutureResponse, error) {
 	conn.fd.queue.PushBack(r)
 	fut := newFutureResponse()
 	conn.fd.completions[r.id] = fut
+	conn.fd.requestKind[r.id] = r.hdr.Opcode
 	conn.fd.mu.Unlock()
 
 	// Signal a reader notifying them about a queued request. This

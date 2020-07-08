@@ -1,4 +1,4 @@
-// Copyright 2018 The gVisor Authors.
+// Copyright 2020 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,48 +22,48 @@ type FUSEOpID uint64
 
 // Opcodes for FUSE operations. Analogous to the opcodes in include/linux/fuse.h.
 const (
-	FUSE_LOOKUP FUSEOpcode = iota + 1
-	FUSE_FORGET            /* no reply */
-	FUSE_GETATTR
-	FUSE_SETATTR
-	FUSE_READLINK
-	FUSE_SYMLINK
+	FUSE_LOOKUP   FUSEOpcode = 1
+	FUSE_FORGET              = 2 /* no reply */
+	FUSE_GETATTR             = 3
+	FUSE_SETATTR             = 4
+	FUSE_READLINK            = 5
+	FUSE_SYMLINK             = 6
 	_
-	FUSE_MKNOD
-	FUSE_MKDIR
-	FUSE_UNLINK
-	FUSE_RMDIR
-	FUSE_RENAME
-	FUSE_LINK
-	FUSE_OPEN
-	FUSE_READ
-	FUSE_WRITE
-	FUSE_STATFS
-	FUSE_RELEASE
+	FUSE_MKNOD   = 8
+	FUSE_MKDIR   = 9
+	FUSE_UNLINK  = 10
+	FUSE_RMDIR   = 11
+	FUSE_RENAME  = 12
+	FUSE_LINK    = 13
+	FUSE_OPEN    = 14
+	FUSE_READ    = 15
+	FUSE_WRITE   = 16
+	FUSE_STATFS  = 17
+	FUSE_RELEASE = 18
 	_
-	FUSE_FSYNC
-	FUSE_SETXATTR
-	FUSE_GETXATTR
-	FUSE_LISTXATTR
-	FUSE_REMOVEXATTR
-	FUSE_FLUSH
-	FUSE_INIT
-	FUSE_OPENDIR
-	FUSE_READDIR
-	FUSE_RELEASEDIR
-	FUSE_FSYNCDIR
-	FUSE_GETLK
-	FUSE_SETLK
-	FUSE_SETLKW
-	FUSE_ACCESS
-	FUSE_CREATE
-	FUSE_INTERRUPT
-	FUSE_BMAP
-	FUSE_DESTROY
-	FUSE_IOCTL
-	FUSE_POLL
-	FUSE_NOTIFY_REPLY
-	FUSE_BATCH_FORGET
+	FUSE_FSYNC        = 20
+	FUSE_SETXATTR     = 21
+	FUSE_GETXATTR     = 22
+	FUSE_LISTXATTR    = 23
+	FUSE_REMOVEXATTR  = 24
+	FUSE_FLUSH        = 25
+	FUSE_INIT         = 26
+	FUSE_OPENDIR      = 27
+	FUSE_READDIR      = 28
+	FUSE_RELEASEDIR   = 29
+	FUSE_FSYNCDIR     = 30
+	FUSE_GETLK        = 31
+	FUSE_SETLK        = 32
+	FUSE_SETLKW       = 33
+	FUSE_ACCESS       = 34
+	FUSE_CREATE       = 35
+	FUSE_INTERRUPT    = 36
+	FUSE_BMAP         = 37
+	FUSE_DESTROY      = 38
+	FUSE_IOCTL        = 39
+	FUSE_POLL         = 40
+	FUSE_NOTIFY_REPLY = 41
+	FUSE_BATCH_FORGET = 42
 )
 
 // FUSEHeaderIn is the header read by the daemon with each request.

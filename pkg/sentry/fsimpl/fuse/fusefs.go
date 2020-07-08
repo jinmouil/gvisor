@@ -1,4 +1,4 @@
-// Copyright 2019 The gVisor Authors.
+// Copyright 2020 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -140,12 +140,14 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	}
 
 	// Create a new FUSE connection.
-	fuseConn := NewFUSEConnection(ctx, fuseFd)
-
 	fs := &filesystem{
 		devMinor: devMinor,
-		fuseConn: fuseConn,
 		opts:     fsopts,
+	}
+
+	if err = NewFUSEConnection(ctx, fuseFd, fs); err != nil {
+		log.Warningf("%s.GetFilesystem: NewFUSEConnection failed with error: %v", fsType.Name(), err)
+		return nil, nil, syserror.EINVAL
 	}
 
 	fs.VFSFilesystem().Init(vfsObj, &fsType, fs)

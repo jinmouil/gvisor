@@ -1,4 +1,4 @@
-// Copyright 2018 The gVisor Authors.
+// Copyright 2020 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +34,26 @@ type testObject struct {
 	opcode linux.FUSEOpcode
 }
 
+// CallTest makes a request to the server and blocks the invoking
+// goroutine until a server responds with a response. Doesn't block
+// a kernel.Task. Analogous to Connection.Call but used for testing.
+func  CallTest(conn *Connection, r *Request) (*Response, error) {
+	fut, err := conn.callFuture(r)
+	if err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-fut.ch:
+	}
+
+	// A response is ready. Resolve and return it.
+	return &Response{
+		hdr:  *fut.hdr,
+		data: fut.data,
+	}, nil
+}
+
 func TestCallAndResolve(t *testing.T) {
 	s := setup(t)
 	defer s.Destroy()
@@ -66,9 +86,8 @@ func TestCallAndResolve(t *testing.T) {
 			t.Fatalf("NewRequest creation failed: %v", err)
 		}
 
-		// CallTaskNonBlock is used by asyc calls and tests. Other FUSE operation impls will use
-		// Call to make a blocking call to the server with the same behaviour.
-		resp, err := fuseConn.CallTaskNonBlock(req)
+		// Analogous to Call except it doesn't block on the task.
+		resp, err := CallTest(fuseConn, req)
 		if err != nil {
 			t.Fatalf("CallTaskNonBlock failed: %v", err)
 		}
@@ -246,5 +265,14 @@ func newTestConnection(system *testutil.System, k *kernel.Kernel) (*Connection, 
 		return nil, nil, err
 	}
 
-	return NewFUSEConnection(system.Ctx, &fuseDev.vfsfd), &fuseDev.vfsfd, nil
+	fs := &filesystem{
+		devMinor: 0,
+		opts:     filesystemOptions{},
+	}
+
+	if err := NewFUSEConnection(system.Ctx, &fuseDev.vfsfd, fs); err != nil {
+		return nil, nil, err
+	}
+
+	return fs.fuseConn, &fuseDev.vfsfd, nil
 }
