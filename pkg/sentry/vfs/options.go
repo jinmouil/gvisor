@@ -82,11 +82,13 @@ type MountFlags struct {
 
 	// NoDev is equivalent to MS_NODEV and indicates that the
 	// filesystem should not allow access to devices (special files).
+	// TODO: respect this flag in non FUSE filesystems.
 	NoDev bool
 
 	// NoSUID is equivalent to MS_NOSUID and indicates that the
 	// filesystem should not honor set-user-ID and set-group-ID bits or
 	// file capabilities when executing programs.
+	// TODO: respect this flag in non FUSE filesystems.
 	NoSUID bool
 }
 

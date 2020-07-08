@@ -81,7 +81,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	mopts := vfs.GenericParseMountOptions(opts.Data)
 	deviceDescriptorStr, ok := mopts["fd"]
 	if !ok {
-		log.Warningf("fusefs.FilesystemType.GetFilesystem: communication file descriptor N (obtained by opening /dev/fuse) must be specified as 'fd=N'")
+		log.Warningf("%s.GetFilesystem: communication file descriptor N (obtained by opening /dev/fuse) must be specified as 'fd=N'", fsType.Name())
 		return nil, nil, syserror.EINVAL
 	}
 	delete(mopts, "fd")
@@ -91,13 +91,11 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		return nil, nil, err
 	}
 
-	taskCtxKey := kernel.CtxTask
-	taskCtxValue := ctx.Value(taskCtxKey)
-	if taskCtxValue == nil {
-		log.Warningf("fusefs.FilesystemType.GetFilesystem: couldn't get kernel task from context")
+	kernelTask := kernel.TaskFromContext(ctx)
+	if kernelTask == nil {
+		log.Warningf("%s.GetFilesystem: couldn't get kernel task from context", fsType.Name())
 		return nil, nil, syserror.EINVAL
 	}
-	kernelTask := taskCtxValue.(*kernel.Task)
 	fuseFd := kernelTask.GetFileVFS2(int32(deviceDescriptor))
 
 	// Parse and set all the other supported FUSE mount options.
@@ -106,7 +104,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		delete(mopts, "user_id")
 		userID, err := strconv.ParseUint(userIDStr, 10, 32)
 		if err != nil {
-			log.Warningf("fusefs.FilesystemType.GetFilesystem: invalid user_id: user_id=%s", userIDStr)
+			log.Warningf("%s.GetFilesystem: invalid user_id: user_id=%s", fsType.Name(), userIDStr)
 			return nil, nil, syserror.EINVAL
 		}
 		fsopts.userID = uint32(userID)
@@ -116,7 +114,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		delete(mopts, "group_id")
 		groupID, err := strconv.ParseUint(groupIDStr, 10, 32)
 		if err != nil {
-			log.Warningf("fusefs.FilesystemType.GetFilesystem: invalid group_id: group_id=%s", groupIDStr)
+			log.Warningf("%s.GetFilesystem: invalid group_id: group_id=%s", fsType.Name(), groupIDStr)
 			return nil, nil, syserror.EINVAL
 		}
 		fsopts.groupID = uint32(groupID)
@@ -128,7 +126,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		delete(mopts, "rootmode")
 		mode, err := strconv.ParseUint(modeStr, 8, 32)
 		if err != nil {
-			ctx.Warningf("fusefs.FilesystemType.GetFilesystem: invalid mode: %q", modeStr)
+			log.Warningf("%s.GetFilesystem: invalid mode: %q", fsType.Name(), modeStr)
 			return nil, nil, syserror.EINVAL
 		}
 		rootMode = linux.FileMode(mode & 07777)
@@ -137,7 +135,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 
 	// Check for unparsed options.
 	if len(mopts) != 0 {
-		log.Warningf("fusefs.FilesystemType.GetFilesystem: unknown options: %v", mopts)
+		log.Warningf("%s.GetFilesystem: unknown options: %v", fsType.Name(), mopts)
 		return nil, nil, syserror.EINVAL
 	}
 
