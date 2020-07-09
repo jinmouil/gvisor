@@ -19,6 +19,7 @@ import (
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
@@ -299,10 +300,17 @@ func (fd *DeviceFD) noReceiverAction(ctx context.Context, fut *FutureResponse) e
 	}
 	delete(fd.requestKind, fut.hdr.Unique)
 
+	res, err := fut.resolve(kernel.TaskFromContext(ctx))
+	if err != nil {
+		return err
+	}
+
 	if opCode == linux.FUSE_INIT {
-		// TODO: process init response here.
-		// Maybe get the creds from the context?
-		// creds := auth.CredentialsFromContext(ctx)
+		return fd.fs.InitRecv(
+			auth.CredentialsFromContext(ctx),
+			kernel.KernelFromContext(ctx),
+			res,
+		)
 	}
 
 	return nil

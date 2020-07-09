@@ -149,16 +149,12 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 
 	fs.VFSFilesystem().Init(vfsObj, &fsType, fs)
 
-	// dispatch a FUSE_INIT request to the FUSE daemon server before
-	// returning. Mount will not block on this dispatched request.
-	// Read the states of the kernel task right now since the
-	// resulting goroutine is different from the current one.
-	go func(k *kernel.Kernel, pid uint32) {
-		if err := fs.Init(creds, k, pid); err != nil {
-			log.Infof("FUSE_INIT failed: %v", err)
-			// TODO: Do something here. No clue what.
-		}
-	}(kernelTask.Kernel(), uint32(kernelTask.ThreadID()))
+	// Send a FUSE_INIT request to the FUSE daemon server before returning.
+	// This call is not blocking.
+	if err := fs.InitSend(creds, uint32(kernelTask.ThreadID())); err != nil {
+		log.Infof("FUSE_INIT failed: %v", err)
+		// TODO: Do something here. No clue what.
+	}
 
 	// root is the fusefs root directory.
 	defaultFusefsDirMode := linux.FileMode(0755)

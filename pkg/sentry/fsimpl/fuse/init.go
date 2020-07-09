@@ -45,17 +45,19 @@ var (
 	MaxUserCongestionThreshold uint16 = FUSE_DEFAULT_CONGESTION_THRESHOLD
 )
 
-// Init sends a FUSE_INIT request, waits for the reply, and processes it.
-func (fs *filesystem) Init(creds *auth.Credentials, k *kernel.Kernel, pid uint32) error {
+// InitSend sends a FUSE_INIT request.
+func (fs *filesystem) InitSend(creds *auth.Credentials, pid uint32) error {
 	req, err := fs.initBuildRequest(creds, pid)
 	if err != nil {
 		return err
 	}
 
-	res, err := fs.fuseConn.CallTaskNonBlock(req)
-	if err != nil {
-		return err
-	}
+	_, err = fs.fuseConn.Call(nil, req)
+	return err
+}
+
+// InitRecv receives a FUSE_INIT reply and process it.
+func (fs *filesystem) InitRecv(creds *auth.Credentials, k *kernel.Kernel, res *Response) error {
 	if err := res.Error(); err != nil {
 		return err
 	}
