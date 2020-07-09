@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -63,7 +64,7 @@ type Connection struct {
 }
 
 // NewFUSEConnection creates a FUSE connection to fd
-func NewFUSEConnection(ctx context.Context, fd *vfs.FileDescription, fs *filesystem) error {
+func NewFUSEConnection(ctx context.Context, fd *vfs.FileDescription) (*Connection, error) {
 	// Mark the device as ready so it can be used. /dev/fuse can only be used if the FD was used to
 	// mount a FUSE filesystem.
 	fuseFD := fd.Impl().(*DeviceFD)
@@ -78,11 +79,9 @@ func NewFUSEConnection(ctx context.Context, fd *vfs.FileDescription, fs *filesys
 	fuseFD.writeCursor = 0
 	fuseFD.readCursor = 0
 
-	conn := &Connection{
-		fd:fuseFD,
-	}
-	fs.fuseConn = conn
-	return nil
+	return &Connection{
+		fd: fuseFD,
+	}, nil
 }
 
 // NewRequest creates a new request that can be sent to the FUSE server.
@@ -115,6 +114,11 @@ func (conn *Connection) NewRequest(creds *auth.Credentials, pid uint32, ino uint
 
 // Call makes a request to the server and blocks the invoking task until a
 // server responds with a response.
+// NOTE: If no task is provided then the Call will simply enqueue the request
+// and return a nil response. No blocking will happen in this case. Instead,
+// this is used to signify that the processing of this request will happen by
+// the kernel.Task that writes the response. See FUSE_INIT for such an
+// invocation.
 func (conn *Connection) Call(t *kernel.Task, r *Request) (*Response, error) {
 	fut, err := conn.callFuture(r)
 	if err != nil {
@@ -156,6 +160,14 @@ func newFutureResponse() *FutureResponse {
 // resolve blocks the task until the server responds to its corresponding request,
 // then returns a resolved response.
 func (r *FutureResponse) resolve(t *kernel.Task) (*Response, error) {
+	// If there is no Task associated with this request  - then we don't try to resolve
+	// the response.  Instead, the task writing the response (proxy to the server) will
+	// process the response on our behalf.
+	if t == nil {
+		log.Infof("fuse.Response: Not waiting on a response from server.")
+		return nil, nil
+	}
+
 	if err := t.Block(r.ch); err != nil {
 		return nil, err
 	}

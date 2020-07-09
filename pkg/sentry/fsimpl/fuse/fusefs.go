@@ -140,14 +140,10 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	}
 
 	// Create a new FUSE connection.
-	fs := &filesystem{
-		devMinor: devMinor,
-		opts:     fsopts,
-	}
-
-	if err = NewFUSEConnection(ctx, fuseFd, fs); err != nil {
-		log.Warningf("%s.GetFilesystem: NewFUSEConnection failed with error: %v", fsType.Name(), err)
-		return nil, nil, syserror.EINVAL
+	fs, err := NewFUSEFilesystem(ctx, devMinor, fsopts, fuseFd)
+	if err != nil {
+		log.Warningf("%s.NewFUSEFilesystem: failed with error: %v", fsType.Name(), err)
+		return nil, nil, err
 	}
 
 	fs.VFSFilesystem().Init(vfsObj, &fsType, fs)
@@ -160,6 +156,26 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	root := fs.newInode(creds, defaultFusefsDirMode)
 
 	return fs.VFSFilesystem(), root.VFSDentry(), nil
+}
+
+// NewFUSEFilesystem creates a new FUSE filesystem.
+func NewFUSEFilesystem(ctx context.Context, devMinor uint32, opts filesystemOptions, device *vfs.FileDescription) (*filesystem, error) {
+	fs := &filesystem{
+		devMinor: devMinor,
+		opts:     opts,
+	}
+
+	conn, err := NewFUSEConnection(ctx, device)
+	if err != nil {
+		log.Warningf("fuse.NewFUSEFilesystem: NewFUSEConnection failed with error: %v", err)
+		return nil, syserror.EINVAL
+	}
+
+	fs.fuseConn = conn
+	fuseFD := device.Impl().(*DeviceFD)
+	fuseFD.fs = fs
+
+	return fs, nil
 }
 
 // Release implements vfs.FilesystemImpl.Release.

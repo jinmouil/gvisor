@@ -37,12 +37,13 @@ type testObject struct {
 // CallTest makes a request to the server and blocks the invoking
 // goroutine until a server responds with a response. Doesn't block
 // a kernel.Task. Analogous to Connection.Call but used for testing.
-func  CallTest(conn *Connection, r *Request) (*Response, error) {
+func CallTest(conn *Connection, r *Request) (*Response, error) {
 	fut, err := conn.callFuture(r)
 	if err != nil {
 		return nil, err
 	}
 
+	// Block without a task.
 	select {
 	case <-fut.ch:
 	}
@@ -265,12 +266,8 @@ func newTestConnection(system *testutil.System, k *kernel.Kernel) (*Connection, 
 		return nil, nil, err
 	}
 
-	fs := &filesystem{
-		devMinor: 0,
-		opts:     filesystemOptions{},
-	}
-
-	if err := NewFUSEConnection(system.Ctx, &fuseDev.vfsfd, fs); err != nil {
+	fs, err := NewFUSEFilesystem(system.Ctx, 0, filesystemOptions{}, &fuseDev.vfsfd)
+	if err != nil {
 		return nil, nil, err
 	}
 

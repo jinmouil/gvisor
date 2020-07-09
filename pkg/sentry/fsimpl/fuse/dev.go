@@ -289,7 +289,7 @@ func (fd *DeviceFD) Seek(ctx context.Context, offset int64, whence int32) (int64
 }
 
 // noReceiverAction has the calling kernel.Task do some action if its known that no
-// reciever is going to be waiting on the future channel. This is to be used by:
+// receiver is going to be waiting on the future channel. This is to be used by:
 // FUSE_INIT.
 func (fd *DeviceFD) noReceiverAction(ctx context.Context, fut *FutureResponse) error {
 	opCode, ok := fd.requestKind[fut.hdr.Unique]
@@ -301,6 +301,8 @@ func (fd *DeviceFD) noReceiverAction(ctx context.Context, fut *FutureResponse) e
 
 	if opCode == linux.FUSE_INIT {
 		// TODO: process init response here.
+		// Maybe get the creds from the context?
+		// creds := auth.CredentialsFromContext(ctx)
 	}
 
 	return nil
