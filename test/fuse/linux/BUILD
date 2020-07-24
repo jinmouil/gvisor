@@ -1,4 +1,4 @@
-load("//tools:defs.bzl", "cc_binary", "cc_library", "default_net_util", "gtest", "select_arch", "select_system")
+load("//third_party/gvisor/tools:defs.bzl", "cc_library", "gtest")
 
 package(
     default_visibility = ["//:sandbox"],
@@ -14,5 +14,18 @@ cc_library(
     ],
     deps = [
         gtest,
+    ],
+)
+
+cc_test(
+    name = "init_test",
+    srcs = [
+        "fuse_base.h",
+        "init_test.cc",
+    ],
+    deps = [
+        ":fuse_base",
+        "//test/util:test_util",
+        "//test/util:test_main",
     ],
 )
