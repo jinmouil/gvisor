@@ -196,7 +196,6 @@ func newFUSEConnection(_ context.Context, fd *vfs.FileDescription, maxInFlightRe
 	// Mark the device as ready so it can be used. /dev/fuse can only be used if the FD was used to
 	// mount a FUSE filesystem.
 	fuseFD := fd.Impl().(*DeviceFD)
-	fuseFD.mounted = true
 
 	// Create the writeBuf for the header to be stored in.
 	hdrLen := uint32((*linux.FUSEHeaderOut)(nil).SizeBytes())
