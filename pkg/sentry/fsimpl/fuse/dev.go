@@ -121,6 +121,7 @@ func (fd *DeviceFD) Read(ctx context.Context, dst usermem.IOSequence, opts vfs.R
 
 	// Return ENODEV if the filesystem is umounted.
 	if fd.fs.umounted {
+		// TODO(gvisor.dev/issue/3525): return ECONNABORTED if aborted via fuse control fs.
 		return 0, syserror.ENODEV
 	}
 
@@ -166,7 +167,7 @@ func (fd *DeviceFD) readLocked(ctx context.Context, dst usermem.IOSequence, opts
 			}
 
 			// Return the error to the calling task.
-			if err := fd.sendError(ctx, errno, req); err != nil {
+			if err := fd.sendError(ctx, errno, req.hdr.Unique); err != nil {
 				return 0, err
 			}
 
@@ -285,7 +286,8 @@ func (fd *DeviceFD) writeLocked(ctx context.Context, src usermem.IOSequence, opt
 
 			fut, ok := fd.completions[hdr.Unique]
 			if !ok {
-				// Server sent us a response for a request we never sent?
+				// Server sent us a response for a request we never sent,
+				// or for which we already received a reply (e.g. aborted), an unlikely event.
 				return 0, syserror.EINVAL
 			}
 
@@ -355,6 +357,14 @@ func (fd *DeviceFD) Seek(ctx context.Context, offset int64, whence int32) (int64
 
 // sendResponse sends a response to the waiting task (if any).
 func (fd *DeviceFD) sendResponse(ctx context.Context, fut *futureResponse) error {
+	// Bookkeeping for async requests.
+	if fut.options.async {
+		fd.fs.conn.asyncLock.Lock()
+		fd.fs.conn.asyncNum--
+		fd.fs.conn.asyncBlockedReleaseLocked()
+		fd.fs.conn.asyncLock.Unlock()
+	}
+
 	// See if the running task need to perform some action before returning.
 	// Since we just finished writing the future, we can be sure that
 	// getResponse generates a populated response.
@@ -374,36 +384,34 @@ func (fd *DeviceFD) sendResponse(ctx context.Context, fut *futureResponse) error
 	return nil
 }
 
-// sendError sends an error response to the waiting task (if any).
-func (fd *DeviceFD) sendError(ctx context.Context, errno int32, req *Request) error {
+// sendError sends an error response to the waiting task (if any) by calling sendResponse().
+func (fd *DeviceFD) sendError(ctx context.Context, errno int32, unique linux.FUSEOpID) error {
 	// Return the error to the calling task.
 	outHdrLen := uint32((*linux.FUSEHeaderOut)(nil).SizeBytes())
 	respHdr := linux.FUSEHeaderOut{
 		Len:    outHdrLen,
 		Error:  errno,
-		Unique: req.hdr.Unique,
+		Unique: unique,
 	}
 
 	fut, ok := fd.completions[respHdr.Unique]
 	if !ok {
-		// Server sent us a response for a request we never sent?
+		// A response for a request we never sent,
+		// or for which we already received a reply (e.g. aborted).
 		return syserror.EINVAL
 	}
 	delete(fd.completions, respHdr.Unique)
 
 	fut.hdr = &respHdr
-	if err := fd.sendResponse(ctx, fut); err != nil {
-		return err
-	}
 
-	return nil
+	return fd.sendResponse(ctx, fut)
 }
 
 // noReceiverAction has the calling kernel.Task do some action if its known that no
 // receiver is going to be waiting on the future channel. This is to be used by:
 // FUSE_INIT.
 func (fd *DeviceFD) noReceiverAction(ctx context.Context, r *Response) error {
-	if r.opcode == linux.FUSE_INIT {
+	if r.opcode == linux.FUSE_INIT && ctx != nil {
 		creds := auth.CredentialsFromContext(ctx)
 		rootUserNs := kernel.KernelFromContext(ctx).RootUserNamespace()
 		return fd.fs.conn.InitRecv(r, creds.HasCapabilityIn(linux.CAP_SYS_ADMIN, rootUserNs))

@@ -15,7 +15,11 @@
 package fuse
 
 import (
+	"sync/atomic"
+	"syscall"
+
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 )
 
@@ -49,6 +53,27 @@ var (
 	MaxUserCongestionThreshold uint16 = fuseDefaultCongestionThreshold
 )
 
+// SetInitialized atomically sets the connection as initialized.
+// It unblocks all the blocked requests issused before initialization.
+func (conn *connection) SetInitialized() {
+	// Unblock the requests sent before INIT.
+	close(conn.initializedChan)
+
+	// Close the channel first to avoid the non-atomic situation
+	// where conn.initialized is true but there are
+	// tasks being blocked on the channel.
+	// And it prevents the newer tasks from gaining
+	// unnecessary higher chance to be issued before the blocked one.
+
+	atomic.StoreInt32(&(conn.initialized), int32(1))
+}
+
+// IsInitialized atomically check if the connection is initialized.
+// pairs with SetInitialized().
+func (conn *connection) Initialized() bool {
+	return atomic.LoadInt32(&(conn.initialized)) != 0
+}
+
 // InitSend sends a FUSE_INIT request.
 func (conn *connection) InitSend(creds *auth.Credentials, pid uint32) error {
 	in := linux.FUSEInitIn{
@@ -59,7 +84,8 @@ func (conn *connection) InitSend(creds *auth.Credentials, pid uint32) error {
 		Flags:        fuseDefaultInitFlags,
 	}
 
-	req, err := conn.NewRequest(creds, pid, 0, linux.FUSE_INIT, &in)
+	options := &requestOptions{async: true}
+	req, err := conn.NewRequest(creds, pid, 0, linux.FUSE_INIT, &in, options)
 	if err != nil {
 		return err
 	}
@@ -102,27 +128,27 @@ func (conn *connection) initProcessReply(out *linux.FUSEInitOut, hasSysAdminCap 
 
 	// No support for limits before minor version 13.
 	if out.Minor >= 13 {
-		conn.bgLock.Lock()
+		conn.asyncLock.Lock()
 
 		if out.MaxBackground > 0 {
-			conn.maxBackground = out.MaxBackground
+			conn.asyncNumMax = out.MaxBackground
 
 			if !hasSysAdminCap &&
-				conn.maxBackground > MaxUserBackgroundRequest {
-				conn.maxBackground = MaxUserBackgroundRequest
+				conn.asyncNumMax > MaxUserBackgroundRequest {
+				conn.asyncNumMax = MaxUserBackgroundRequest
 			}
 		}
 
 		if out.CongestionThreshold > 0 {
-			conn.congestionThreshold = out.CongestionThreshold
+			conn.asyncCongestionThreshold = out.CongestionThreshold
 
 			if !hasSysAdminCap &&
-				conn.congestionThreshold > MaxUserCongestionThreshold {
-				conn.congestionThreshold = MaxUserCongestionThreshold
+				conn.asyncCongestionThreshold > MaxUserCongestionThreshold {
+				conn.asyncCongestionThreshold = MaxUserCongestionThreshold
 			}
 		}
 
-		conn.bgLock.Unlock()
+		conn.asyncLock.Unlock()
 	}
 
 	// No support for the following flags before minor version 6.
@@ -163,4 +189,58 @@ func (conn *connection) initProcessReply(out *linux.FUSEInitOut, hasSysAdminCap 
 	conn.SetInitialized()
 
 	return nil
+}
+
+// Abort this FUSE connection.
+// It tries to acquire conn.fd.mu, conn.lock, conn.bgLock in order.
+// All possible requests waiting or blocking will be aborted.
+func (conn *connection) abort(ctx context.Context) {
+	conn.fd.mu.Lock()
+	defer conn.fd.mu.Unlock()
+
+	conn.lock.Lock()
+	defer conn.lock.Unlock()
+
+	conn.asyncLock.Lock()
+	defer conn.asyncLock.Unlock()
+
+	if !conn.connected {
+		return
+	}
+
+	conn.connected = false
+
+	// The requets blocked before initialization.
+	// Will reach call() `connected` check and return.
+	if !conn.Initialized() {
+		conn.SetInitialized()
+	}
+
+	// The requests not yet sent to FUSE daemon.
+	// Early terminate.
+	for !conn.fd.queue.Empty() {
+		req := conn.fd.queue.Front()
+		conn.fd.queue.Remove(req)
+		conn.fd.sendError(ctx, -int32(syscall.ECONNABORTED), req.hdr.Unique)
+	}
+
+	// The requests sent to FUSE daemon.
+	// Set ECONNABORTED error.
+	// sendError() will remove them from `fd.completion` map.
+	for _, fut := range conn.fd.completions {
+		conn.fd.sendError(ctx, -int32(syscall.ECONNABORTED), fut.hdr.Unique)
+	}
+
+	// Unblock all blocked async req.
+	// Will reach call() `connected` check and return.
+	for !conn.asyncBlockedQueue.empty() {
+		conn.asyncBlockedQueue.dequeue()
+	}
+
+	// The requests not yet written to FUSE device.
+	// Early terminate.
+	// Will reach callFutureLocked() `connected` check and return.
+	close(conn.fd.fullQueueCh)
+
+	// TODO(gvisor.dev/issue/3528): Forget all pending forget reqs.
 }

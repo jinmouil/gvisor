@@ -32,6 +32,10 @@ import (
 // Name is the default filesystem name.
 const Name = "fuse"
 
+// maxActiveRequestsDefault is the default setting controlling the upper bound
+// on the number of active requests at any given time.
+const maxActiveRequestsDefault = 10000
+
 // FilesystemType implements vfs.FilesystemType.
 type FilesystemType struct{}
 
@@ -200,10 +204,13 @@ func newFUSEFilesystem(ctx context.Context, devMinor uint32, opts *filesystemOpt
 
 // Release implements vfs.FilesystemImpl.Release.
 func (fs *filesystem) Release(ctx context.Context) {
-	fs.conn.connected = false
+	fs.conn.abort(ctx)
 	fs.umounted = true
 
-	fs.fd.waitQueue.Notify(waiter.EventIn)
+	fs.conn.fd.mu.Lock()
+	// Notify all the waiters on this fd.
+	fs.conn.fd.waitQueue.Notify(waiter.EventIn)
+	fs.conn.fd.mu.Unlock()
 
 	fs.Filesystem.VFSFilesystem().VirtualFilesystem().PutAnonBlockDevMinor(fs.devMinor)
 	fs.Filesystem.Release(ctx)
