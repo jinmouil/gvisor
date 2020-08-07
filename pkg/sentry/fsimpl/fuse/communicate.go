@@ -33,6 +33,10 @@ type requestOptions struct {
 	// if this request is async.
 	async bool
 
+	// if this request encountered error before being written to FUSE device
+	// (i.e. sent to user namespace).
+	err bool
+
 	// if this request does not expect a reply.
 	noReply bool
 }
