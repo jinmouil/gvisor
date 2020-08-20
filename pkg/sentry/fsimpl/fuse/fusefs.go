@@ -505,6 +505,12 @@ func (i *inode) newEntry(kernelTask *kernel.Task, req *Request, name string, fil
 	return child.VFSDentry(), nil
 }
 
+// Getlink implements Inode.Getlink.
+func (i *inode) Getlink(ctx context.Context, mnt *vfs.Mount) (vfs.VirtualDentry, string, error) {
+	path, err := i.Readlink(ctx, mnt)
+	return vfs.VirtualDentry{}, path, err
+}
+
 // Readlink implements Inode.Readlink.
 func (i *inode) Readlink(ctx context.Context, mnt *vfs.Mount) (string, error) {
 	if i.Mode().FileType()&linux.S_IFLNK == 0 {
