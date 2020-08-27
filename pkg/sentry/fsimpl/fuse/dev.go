@@ -170,6 +170,7 @@ func (fd *DeviceFD) readLocked(ctx context.Context, dst usermem.IOSequence, opts
 			fd.queue.Remove(req)
 			if req.hdr.Opcode == linux.FUSE_RELEASE {
 				fd.numActiveRequests -= 1
+				delete(fd.completions, req.hdr.Unique)
 			}
 
 			// Restart the read as this request was invalid.
@@ -189,6 +190,7 @@ func (fd *DeviceFD) readLocked(ctx context.Context, dst usermem.IOSequence, opts
 			fd.queue.Remove(req)
 			if req.hdr.Opcode == linux.FUSE_RELEASE {
 				fd.numActiveRequests -= 1
+				delete(fd.completions, req.hdr.Unique)
 			}
 			break
 		}
