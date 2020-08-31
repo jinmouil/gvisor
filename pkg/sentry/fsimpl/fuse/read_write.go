@@ -29,9 +29,14 @@ import (
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
-// ReadInPages sends FUSE_READ requests for the size after round it up to a multiple of page size,
-// blocks on it for reply, processes the reply and returns the payload (or joined payloads) as a byte slice.
-// This is used for the general purpose reading. We do not support direct IO (which read the exact number of bytes) at this moment.
+// ReadInPages sends FUSE_READ requests for the size after
+// round it up to a multiple of page size,
+// blocks on it for reply,
+// processes the reply and returns the payload (or joined payloads)
+// as a byte slice.
+// This is used for the general purpose reading.
+// We do not support direct IO
+// (which read the exact number of bytes) at this moment.
 func (fs *filesystem) ReadInPages(ctx context.Context, fd *regularFileFD, off uint64, size uint32) ([]byte, uint32, error) {
 	attributeVersion := atomic.LoadUint64(&fs.conn.attributeVersion)
 
@@ -57,6 +62,14 @@ func (fs *filesystem) ReadInPages(ctx context.Context, fd *regularFileFD, off ui
 	// Always request bytes as a multiple of pages.
 	pagesRead, pagesToRead := uint32(0), uint32(readSize/usermem.PageSize)
 
+	// Reuse the same struct for unmarshalling to avoid unnecessary memory allocation.
+	in := linux.FUSEReadIn{
+		Fh:        fd.Fh,
+		LockOwner: 0, // TODO(gvisor.dev/issue/3245): file lock
+		ReadFlags: 0, // TODO(gvisor.dev/issue/3245): |= linux.FUSE_READ_LOCKOWNER
+		Flags:     fd.statusFlags(),
+	}
+
 	// This loop is intended for fragmented read where the bytes to read is
 	// larger than either the maxPages or maxRead.
 	// For the majority of reads with normal size, this loop should only
@@ -67,16 +80,10 @@ func (fs *filesystem) ReadInPages(ctx context.Context, fd *regularFileFD, off ui
 			pagesCanRead = maxPages
 		}
 
-		in := linux.FUSEReadIn{
-			Fh:        fd.Fh,
-			Offset:    off + (uint64(pagesRead) << usermem.PageShift),
-			Size:      pagesCanRead << usermem.PageShift,
-			LockOwner: 0, // TODO(gvisor.dev/issue/3245): file lock
-			ReadFlags: 0, // TODO(gvisor.dev/issue/3245): |= linux.FUSE_READ_LOCKOWNER
-			Flags:     fd.statusFlags(),
-		}
+		in.Offset = off + (uint64(pagesRead) << usermem.PageShift)
+		in.Size = pagesCanRead << usermem.PageShift
 
-		req, err := fs.conn.NewRequest(auth.CredentialsFromContext(ctx), uint32(kernel.TaskFromContext(ctx).ThreadID()), fd.inode().NodeID, linux.FUSE_READ, &in)
+		req, err := fs.conn.NewRequest(auth.CredentialsFromContext(ctx), uint32(t.ThreadID()), fd.inode().NodeID, linux.FUSE_READ, &in)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -137,7 +144,8 @@ func (fs *filesystem) ReadInPages(ctx context.Context, fd *regularFileFD, off ui
 
 // ReadCallback updates several information after receiving a read response.
 func (fs *filesystem) ReadCallback(ctx context.Context, fd *regularFileFD, off uint64, size uint32, sizeRead uint32, attributeVersion uint64) {
-	// TODO(gvisor.dev/issue/3247): support async read. If this is called by an async read, correctly process it.
+	// TODO(gvisor.dev/issue/3247): support async read.
+	// If this is called by an async read, correctly process it.
 	// May need to update the signature.
 
 	i := fd.inode()
@@ -158,4 +166,84 @@ func (fs *filesystem) ReadCallback(ctx context.Context, fd *regularFileFD, off u
 		}
 		fs.conn.mu.Unlock()
 	}
+}
+
+// Write sends a FUSE_WRITE request.
+func (fs *filesystem) Write(ctx context.Context, fd *regularFileFD, off uint64, size uint32) (uint32, error) {
+	// One request cannnot exceed either maxWrite or maxPages.
+	maxWrite := uint32(fs.conn.maxPages) << usermem.PageShift
+	if maxWrite < fs.conn.maxWrite {
+		maxWrite = fs.conn.maxWrite
+	}
+
+	t := kernel.TaskFromContext(ctx)
+	if t == nil {
+		log.Warningf("fusefs.Read: couldn't get kernel task from context")
+		return 0, syserror.EINVAL
+	}
+
+	// Reuse the same struct for unmarshalling to avoid unnecessary memory allocation.
+	in := linux.FUSEWriteIn{
+		Fh:         fd.Fh,
+		LockOwner:  0, // TODO(gvisor.dev/issue/3245): file lock
+		WriteFlags: 0,
+		Flags:      0,
+	}
+
+	var written uint32
+	// This loop is intended for fragmented write where the bytes to write is
+	// larger than either the maxWrite or maxPages or when bigWrites is false.
+	// Unless the user explicitly uses a small value for max_write, this loop
+	// is expected to execute only once for the majority of the writes.
+	for size > 0 {
+		toWrite := size
+
+		// Limit the write size to one page.
+		// Note that the bigWrites flag is obsolete,
+		// latest libfuse always sets it on.
+		if !fs.conn.bigWrites && toWrite > usermem.PageSize {
+			toWrite = usermem.PageSize
+		}
+
+		// Limit the write size to maxWrite.
+		if toWrite > maxWrite {
+			toWrite = maxWrite
+		}
+
+		in.Offset = off + uint64(written)
+		in.Size = toWrite
+
+		req, err := fs.conn.NewRequest(auth.CredentialsFromContext(ctx), uint32(t.ThreadID()), fd.inode().NodeID, linux.FUSE_WRITE, &in)
+		if err != nil {
+			return 0, err
+		}
+
+		// TODO(gvisor.dev/issue/3247): support async write.
+
+		res, err := fs.conn.Call(t, req)
+		if err != nil {
+			return 0, err
+		}
+		if err := res.Error(); err != nil {
+			return 0, err
+		}
+
+		// Not enough bytes in response,
+		// the FUSE server sends back a response
+		// that cannot fit the hdr.
+		if len(res.data) <= res.hdr.SizeBytes() {
+			if len(res.data) < res.hdr.SizeBytes() {
+				return nil, 0, fmt.Errorf("FUSE_READ response too small. Minimum length required: %d,  but got length %d", res.hdr.SizeBytes(), len(res.data))
+			}
+			break
+		}
+
+		written += 1
+	}
+
+	if written > 0 {
+		// update size
+	}
+
+	return written, nil
 }

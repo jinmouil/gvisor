@@ -26,6 +26,7 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/pkg/safemem"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -63,6 +64,11 @@ type Request struct {
 	id   linux.FUSEOpID
 	hdr  *linux.FUSEHeaderIn
 	data []byte
+
+	// readWriter writes the return data of read to the user memory.
+	readWriter safemem.Writer
+	// writeReader reads the data to write from the user memory.
+	writeReader safemem.Reader
 }
 
 // Response represents an actual response from the server, including the

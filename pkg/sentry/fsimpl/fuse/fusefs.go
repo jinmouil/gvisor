@@ -18,6 +18,7 @@ package fuse
 import (
 	"math"
 	"strconv"
+	"sync"
 	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
@@ -224,12 +225,17 @@ type inode struct {
 	kernfs.InodeDirectoryNoNewChildren
 	kernfs.OrderedChildren
 
-	NodeID uint64
 	dentry kernfs.Dentry
-	locks  vfs.FileLocks
 
 	// the owning filesystem. fs is immutable.
 	fs *filesystem
+
+	// metaDataMu protects the metadata of this inode.
+	metadataMu sync.Mutex
+
+	NodeID uint64
+
+	locks vfs.FileLocks
 
 	// size of the file.
 	size uint64

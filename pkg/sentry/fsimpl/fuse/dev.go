@@ -182,6 +182,7 @@ func (fd *DeviceFD) readLocked(ctx context.Context, dst usermem.IOSequence, opts
 		if err != nil {
 			return 0, err
 		}
+
 		readCursor += uint32(n)
 		bytesRead += int64(n)
 
