@@ -24,6 +24,7 @@
 
 #include "gtest/gtest.h"
 #include "test/fuse/linux/fuse_base.h"
+#include "test/util/fs_util.h"
 #include "test/util/fuse_util.h"
 #include "test/util/temp_umask.h"
 #include "test/util/test_util.h"
@@ -34,10 +35,6 @@ namespace testing {
 namespace {
 
 class CreateTest : public FuseTest {
-  // CreateTest doesn't care the release request when close a fd, so it doesn't
-  // check leftover requests when tearing down.
-  void TearDown() { UnmountFuse(); }
-
  protected:
   const std::string test_file_name_ = "test_file";
   const mode_t mode = S_IFREG | S_IRWXU | S_IRWXG | S_IRWXO;
@@ -89,6 +86,8 @@ TEST_F(CreateTest, CreateFile) {
 
   // Skip the request of FUSE_LOOKUP.
   SkipServerActualRequest();
+
+  // Get the first FUSE_CREATE.
   GetServerActualRequest(iov_in);
   EXPECT_EQ(in_header.len, sizeof(in_header) + sizeof(in_payload) +
                                test_file_name_.size() + 1);
@@ -98,7 +97,17 @@ TEST_F(CreateTest, CreateFile) {
   EXPECT_EQ(in_payload.umask, new_mask);
   EXPECT_EQ(std::string(name.data()), test_file_name_);
 
+  // Get the successive FUSE_OPEN.
+  struct fuse_open_in in_payload_open;
+  iov_in = FuseGenerateIovecs(in_header, in_payload_open);
+  GetServerActualRequest(iov_in);
+  EXPECT_EQ(in_header.len, sizeof(in_header) + sizeof(in_payload_open));
+  EXPECT_EQ(in_header.opcode, FUSE_OPEN);
+  EXPECT_EQ(in_payload_open.flags, open_flags & O_ACCMODE);
+
   EXPECT_THAT(close(fd), SyscallSucceeds());
+  // Skip the FUSE_RELEASE.
+  SkipServerActualRequest();
 }
 
 TEST_F(CreateTest, CreateFileAlreadyExists) {
@@ -111,7 +120,6 @@ TEST_F(CreateTest, CreateFileAlreadyExists) {
 
   EXPECT_THAT(open(test_file_path.c_str(), mode, open_flags),
               SyscallFailsWithErrno(EEXIST));
-  EXPECT_EQ(GetServerNumUnconsumedRequests(), 0);
 }
 
 }  // namespace
