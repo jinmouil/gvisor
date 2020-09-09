@@ -488,7 +488,7 @@ type FUSEReleaseIn struct {
 	// Flags of the file.
 	Flags uint32
 
-	// Flags of this release request.
+	// ReleaseFlags of this release request.
 	ReleaseFlags uint32
 
 	// LockOwner is the id of the lock owner if there is one.

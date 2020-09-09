@@ -14,23 +14,20 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fuse.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <linux/fuse.h>
-
 #include <string>
 #include <vector>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "test/fuse/linux/fuse_base.h"
 #include "test/util/fuse_util.h"
 #include "test/util/test_util.h"
-
-#include "fuse_base.h"
 
 namespace gvisor {
 namespace testing {
@@ -67,6 +64,7 @@ TEST_F(ReleaseTest, RegularFile) {
   EXPECT_EQ(in_header.len, sizeof(in_header) + sizeof(in_payload));
   EXPECT_EQ(in_header.opcode, FUSE_RELEASE);
   EXPECT_EQ(in_payload.flags, O_RDWR);
+  EXPECT_EQ(in_payload.fh, 1);
 }
 
 }  // namespace

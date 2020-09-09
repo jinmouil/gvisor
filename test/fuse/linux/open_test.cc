@@ -14,21 +14,18 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fuse.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <linux/fuse.h>
-
 #include <string>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "test/fuse/linux/fuse_base.h"
 #include "test/util/fuse_util.h"
 #include "test/util/test_util.h"
-
-#include "fuse_base.h"
 
 namespace gvisor {
 namespace testing {
@@ -67,6 +64,7 @@ TEST_F(OpenTest, RegularFile) {
   struct fuse_open_in in_payload;
   auto iov_in = FuseGenerateIovecs(in_header, in_payload);
   GetServerActualRequest(iov_in);
+
   EXPECT_EQ(in_header.len, sizeof(in_header) + sizeof(in_payload));
   EXPECT_EQ(in_header.opcode, FUSE_OPEN);
   EXPECT_EQ(in_payload.flags, O_RDWR);
@@ -78,7 +76,7 @@ TEST_F(OpenTest, SetNoOpen) {
       JoinPath(mount_point_.path().c_str(), test_file_);
   SetServerInodeLookup(test_file_, regular_file_);
 
-  // ENOSYS indicate open is not implemented.
+  // ENOSYS indicates open is not implemented.
   struct fuse_out_header out_header = {
       .len = sizeof(struct fuse_out_header) + sizeof(struct fuse_open_out),
       .error = -ENOSYS,
@@ -102,14 +100,14 @@ TEST_F(OpenTest, OpenFail) {
 
   auto iov_out = FuseGenerateIovecs(out_header, out_payload_);
   SetServerResponse(FUSE_OPENDIR, iov_out);
-
   ASSERT_THAT(open(mount_point_.path().c_str(), O_RDWR),
               SyscallFailsWithErrno(ENOENT));
+
   struct fuse_in_header in_header;
   struct fuse_open_in in_payload;
   auto iov_in = FuseGenerateIovecs(in_header, in_payload);
-
   GetServerActualRequest(iov_in);
+
   EXPECT_EQ(in_header.len, sizeof(in_header) + sizeof(in_payload));
   EXPECT_EQ(in_header.opcode, FUSE_OPENDIR);
   EXPECT_EQ(in_payload.flags, O_RDWR);
