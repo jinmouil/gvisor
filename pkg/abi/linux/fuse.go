@@ -319,7 +319,7 @@ type FUSEGetAttrOut struct {
 
 // FUSEEntryOut is the reply sent by the daemon to the kernel
 // for FUSE_MKNOD, FUSE_MKDIR, FUSE_SYMLINK, FUSE_LINK and
-// inode.Lookup.
+// FUSE_LOOKUP.
 //
 // +marshal
 type FUSEEntryOut struct {

@@ -14,22 +14,19 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fuse.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <linux/fuse.h>
-
 #include <string>
 #include <vector>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "test/fuse/linux/fuse_base.h"
 #include "test/util/fuse_util.h"
 #include "test/util/test_util.h"
-
-#include "fuse_base.h"
 
 namespace gvisor {
 namespace testing {
@@ -62,13 +59,12 @@ TEST_F(SymlinkTest, CreateSymLink) {
   auto iov_in =
       FuseGenerateIovecs(in_header, actual_symlink, actual_target_file);
   GetServerActualRequest(iov_in);
+
   EXPECT_EQ(in_header.len,
             sizeof(in_header) + symlink_.length() + target_file_.length() + 2);
   EXPECT_EQ(in_header.opcode, FUSE_SYMLINK);
-  EXPECT_EQ(0, memcmp(actual_target_file.data(), target_file_.c_str(),
-                      target_file_.length() + 1));
-  EXPECT_EQ(0, memcmp(actual_symlink.data(), symlink_.c_str(),
-                      symlink_.length() + 1));
+  EXPECT_EQ(std::string(actual_target_file.data()), target_file_);
+  EXPECT_EQ(std::string(actual_symlink.data()), symlink_);
 }
 
 TEST_F(SymlinkTest, FileTypeError) {

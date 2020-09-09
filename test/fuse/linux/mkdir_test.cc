@@ -14,23 +14,20 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fuse.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <linux/fuse.h>
-
 #include <string>
 #include <vector>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "test/util/fs_util.h"
+#include "test/fuse/linux/fuse_base.h"
 #include "test/util/fuse_util.h"
+#include "test/util/temp_umask.h"
 #include "test/util/test_util.h"
-
-#include "fuse_base.h"
 
 namespace gvisor {
 namespace testing {
@@ -54,7 +51,7 @@ TEST_F(MkdirTest, CreateDir) {
   struct fuse_entry_out out_payload = DefaultEntryOut(S_IFDIR | perms_, 5);
   auto iov_out = FuseGenerateIovecs(out_header, out_payload);
   SetServerResponse(FUSE_MKDIR, iov_out);
-  umask(new_umask);
+  TempUmask mask(new_umask);
   ASSERT_THAT(mkdir(test_dir_path_.c_str(), 0777), SyscallSucceeds());
 
   struct fuse_in_header in_header;
@@ -62,12 +59,13 @@ TEST_F(MkdirTest, CreateDir) {
   std::vector<char> actual_dir(test_dir_.length() + 1);
   auto iov_in = FuseGenerateIovecs(in_header, in_payload, actual_dir);
   GetServerActualRequest(iov_in);
+
   EXPECT_EQ(in_header.len,
             sizeof(in_header) + sizeof(in_payload) + test_dir_.length() + 1);
   EXPECT_EQ(in_header.opcode, FUSE_MKDIR);
   EXPECT_EQ(in_payload.mode & 0777, perms_ & ~new_umask);
-  EXPECT_EQ(
-      0, memcmp(actual_dir.data(), test_dir_.c_str(), test_dir_.length() + 1));
+  EXPECT_EQ(in_payload.umask, new_umask);
+  EXPECT_EQ(std::string(actual_dir.data()), test_dir_);
 }
 
 TEST_F(MkdirTest, FileTypeError) {

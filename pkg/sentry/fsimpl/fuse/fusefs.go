@@ -382,6 +382,7 @@ func (i *inode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentr
 	return &fd.vfsfd, nil
 }
 
+// NewFile implements kernfs.Inode.Lookup.
 func (i *inode) Lookup(ctx context.Context, name string) (*vfs.Dentry, error) {
 	in := linux.FUSELookupIn{Name: name}
 	return i.newEntry(ctx, name, 0, linux.FUSE_LOOKUP, &in)
@@ -420,7 +421,7 @@ func (i *inode) NewNode(ctx context.Context, name string, opts vfs.MknodOptions)
 	in := linux.FUSEMknodIn{
 		MknodMeta: linux.FUSEMknodMeta{
 			Mode:  uint32(opts.Mode),
-			Rdev:  (opts.DevMinor & 0xff) | (opts.DevMajor << 8) | (opts.DevMinor & ^uint32((0xff)) << 12),
+			Rdev:  linux.MakeDeviceID(uint16(opts.DevMajor), opts.DevMinor),
 			Umask: uint32(kernel.TaskFromContext(ctx).FSContext().Umask()),
 		},
 		Name: name,
@@ -477,7 +478,7 @@ func (i *inode) RmDir(ctx context.Context, name string, child *vfs.Dentry) error
 }
 
 // newEntry calls FUSE server for entry creation and allocates corresponding entry according to response.
-// Shared by FUSE_MKNOD, FUSE_MKDIR, FUSE_SYMLINK, FUSE_LINK and inode.Lookup.
+// Shared by FUSE_MKNOD, FUSE_MKDIR, FUSE_SYMLINK, FUSE_LINK and FUSE_LOOKUP.
 func (i *inode) newEntry(ctx context.Context, name string, fileType linux.FileMode, opcode linux.FUSEOpcode, payload marshal.Marshallable) (*vfs.Dentry, error) {
 	kernelTask := kernel.TaskFromContext(ctx)
 	if kernelTask == nil {
@@ -517,7 +518,7 @@ func (i *inode) Getlink(ctx context.Context, mnt *vfs.Mount) (vfs.VirtualDentry,
 	return vfs.VirtualDentry{}, path, err
 }
 
-// Readlink implements Inode.Readlink.
+// Readlink implements kernfs.Inode.Readlink.
 func (i *inode) Readlink(ctx context.Context, mnt *vfs.Mount) (string, error) {
 	if i.Mode().FileType()&linux.S_IFLNK == 0 {
 		return "", syserror.EINVAL

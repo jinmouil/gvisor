@@ -14,22 +14,20 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fuse.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <linux/fuse.h>
-
 #include <string>
 #include <vector>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "test/fuse/linux/fuse_base.h"
 #include "test/util/fuse_util.h"
+#include "test/util/temp_umask.h"
 #include "test/util/test_util.h"
-
-#include "fuse_base.h"
 
 namespace gvisor {
 namespace testing {
@@ -38,13 +36,13 @@ namespace {
 
 class MknodTest : public FuseTest {
  protected:
-  const std::string test_file_name_ = "test_file";
+  const std::string test_file_ = "test_file";
   const mode_t perms_ = S_IRWXU | S_IRWXG | S_IRWXO;
 };
 
 TEST_F(MknodTest, RegularFile) {
   const std::string test_file_path =
-      JoinPath(mount_point_.path().c_str(), test_file_name_);
+      JoinPath(mount_point_.path().c_str(), test_file_);
   const mode_t new_umask = 0077;
 
   struct fuse_out_header out_header = {
@@ -53,25 +51,27 @@ TEST_F(MknodTest, RegularFile) {
   struct fuse_entry_out out_payload = DefaultEntryOut(S_IFREG | perms_, 5);
   auto iov_out = FuseGenerateIovecs(out_header, out_payload);
   SetServerResponse(FUSE_MKNOD, iov_out);
-  umask(new_umask);
+  TempUmask mask(new_umask);
   ASSERT_THAT(mknod(test_file_path.c_str(), perms_, 0), SyscallSucceeds());
 
   struct fuse_in_header in_header;
   struct fuse_mknod_in in_payload;
-  std::vector<char> actualFileName(test_file_name_.length() + 1);
-  auto iov_in = FuseGenerateIovecs(in_header, in_payload, actualFileName);
+  std::vector<char> actual_file(test_file_.length() + 1);
+  auto iov_in = FuseGenerateIovecs(in_header, in_payload, actual_file);
   GetServerActualRequest(iov_in);
-  EXPECT_EQ(in_header.len, sizeof(in_header) + sizeof(in_payload) +
-                               test_file_name_.length() + 1);
+
+  EXPECT_EQ(in_header.len,
+            sizeof(in_header) + sizeof(in_payload) + test_file_.length() + 1);
   EXPECT_EQ(in_header.opcode, FUSE_MKNOD);
   EXPECT_EQ(in_payload.mode & 0777, perms_ & ~new_umask);
-  EXPECT_EQ(0, memcmp(actualFileName.data(), test_file_name_.c_str(),
-                      test_file_name_.length() + 1));
+  EXPECT_EQ(in_payload.umask, new_umask);
+  EXPECT_EQ(in_payload.rdev, 0);
+  EXPECT_EQ(std::string(actual_file.data()), test_file_);
 }
 
 TEST_F(MknodTest, FileTypeError) {
   const std::string test_file_path =
-      JoinPath(mount_point_.path().c_str(), test_file_name_);
+      JoinPath(mount_point_.path().c_str(), test_file_);
 
   struct fuse_out_header out_header = {
       .len = sizeof(struct fuse_out_header) + sizeof(struct fuse_entry_out),
@@ -87,7 +87,7 @@ TEST_F(MknodTest, FileTypeError) {
 
 TEST_F(MknodTest, NodeIDError) {
   const std::string test_file_path =
-      JoinPath(mount_point_.path().c_str(), test_file_name_);
+      JoinPath(mount_point_.path().c_str(), test_file_);
 
   struct fuse_out_header out_header = {
       .len = sizeof(struct fuse_out_header) + sizeof(struct fuse_entry_out),
