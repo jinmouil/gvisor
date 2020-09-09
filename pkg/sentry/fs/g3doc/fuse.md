@@ -256,16 +256,18 @@ I/O syscalls like `read(2)`, `write(2)` and `mmap(2)`.
 
 ## Benchmark FUSE
 
-FUSE benchmark makes FUSE syscall inside docker container to make sure required environment conditions
-are met - such as having the right libraries to start a FUSE server.
+FUSE benchmark makes FUSE syscall inside docker container to make sure required
+environment conditions are met - such as having the right libraries to start a 
+FUSE server.
 
 ### Setup
 
 To run benchmark:
 
-1. Make sure you have `Docker` installed
-2. Download all docker images `make load-all-images`
-3. Config `runsc` docker runtime to have VFS2 and FUSE supported. (e.g.  `make configure RUNTIME=runsc ARGS="--vfs2 --fuse ..." ...`)
+1. Make sure you have `Docker` installed.
+2. Download all docker images `make load-all-images`.
+3. Config `runsc` docker runtime to have VFS2 and FUSE supported. 
+(e.g.  `make configure RUNTIME=runsc ARGS="--vfs2 --fuse ..." ...`)
 
 You should now have a runtime with the following options configured in
 `/etc/docker/daemon.json`
