@@ -18,6 +18,7 @@ package muxed
 import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -127,6 +128,15 @@ func (m *InjectableEndpoint) Wait() {
 	for _, ep := range m.routes {
 		ep.Wait()
 	}
+}
+
+// ARPHardwareType implements stack.LinkEndpoint.ARPHardwareType.
+func (*InjectableEndpoint) ARPHardwareType() header.ARPHardwareType {
+	panic("unsupported operation")
+}
+
+// AddHeader implements stack.LinkEndpoint.AddHeader.
+func (*InjectableEndpoint) AddHeader(local, remote tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
 }
 
 // NewInjectableEndpoint creates a new multi-endpoint injectable endpoint.

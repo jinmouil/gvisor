@@ -22,6 +22,7 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fspath"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/usermem"
@@ -39,6 +40,10 @@ func (d *dentry) copyUpLocked(ctx context.Context) error {
 	if d.isCopiedUp() {
 		return nil
 	}
+
+	// Attach our credentials to the context, as some VFS operations use
+	// credentials from context rather an take an explicit creds parameter.
+	ctx = auth.ContextWithCredentials(ctx, d.fs.creds)
 
 	ftype := atomic.LoadUint32(&d.mode) & linux.S_IFMT
 	switch ftype {
@@ -86,6 +91,10 @@ func (d *dentry) copyUpLocked(ctx context.Context) error {
 		if err != nil {
 			ctx.Warningf("Unrecoverable overlayfs inconsistency: failed to delete upper layer file after copy-up error: %v", err)
 		}
+		if d.upperVD.Ok() {
+			d.upperVD.DecRef(ctx)
+			d.upperVD = vfs.VirtualDentry{}
+		}
 	}
 	switch ftype {
 	case linux.S_IFREG:
@@ -98,7 +107,7 @@ func (d *dentry) copyUpLocked(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		defer oldFD.DecRef()
+		defer oldFD.DecRef(ctx)
 		newFD, err := vfsObj.OpenAt(ctx, d.fs.creds, &newpop, &vfs.OpenOptions{
 			Flags: linux.O_WRONLY | linux.O_CREAT | linux.O_EXCL,
 			Mode:  linux.FileMode(d.mode &^ linux.S_IFMT),
@@ -106,7 +115,7 @@ func (d *dentry) copyUpLocked(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		defer newFD.DecRef()
+		defer newFD.DecRef(ctx)
 		bufIOSeq := usermem.BytesIOSequence(make([]byte, 32*1024)) // arbitrary buffer size
 		for {
 			readN, readErr := oldFD.Read(ctx, bufIOSeq, vfs.ReadOptions{})
@@ -229,7 +238,10 @@ func (d *dentry) copyUpLocked(ctx context.Context) error {
 		panic(fmt.Sprintf("unexpected file type %o", ftype))
 	}
 
-	// TODO(gvisor.dev/issue/1199): copy up xattrs
+	if err := d.copyXattrsLocked(ctx); err != nil {
+		cleanupUndoCopyUp()
+		return err
+	}
 
 	// Update the dentry's device and inode numbers (except for directories,
 	// for which these remain overlay-assigned).
@@ -241,14 +253,10 @@ func (d *dentry) copyUpLocked(ctx context.Context) error {
 			Mask: linux.STATX_INO,
 		})
 		if err != nil {
-			d.upperVD.DecRef()
-			d.upperVD = vfs.VirtualDentry{}
 			cleanupUndoCopyUp()
 			return err
 		}
 		if upperStat.Mask&linux.STATX_INO == 0 {
-			d.upperVD.DecRef()
-			d.upperVD = vfs.VirtualDentry{}
 			cleanupUndoCopyUp()
 			return syserror.EREMOTE
 		}
@@ -258,5 +266,44 @@ func (d *dentry) copyUpLocked(ctx context.Context) error {
 	}
 
 	atomic.StoreUint32(&d.copiedUp, 1)
+	return nil
+}
+
+// copyXattrsLocked copies a subset of lower's extended attributes to upper.
+// Attributes that configure an overlay in the lower are not copied up.
+//
+// Preconditions: d.copyMu must be locked for writing.
+func (d *dentry) copyXattrsLocked(ctx context.Context) error {
+	vfsObj := d.fs.vfsfs.VirtualFilesystem()
+	lowerPop := &vfs.PathOperation{Root: d.lowerVDs[0], Start: d.lowerVDs[0]}
+	upperPop := &vfs.PathOperation{Root: d.upperVD, Start: d.upperVD}
+
+	lowerXattrs, err := vfsObj.ListXattrAt(ctx, d.fs.creds, lowerPop, 0)
+	if err != nil {
+		if err == syserror.EOPNOTSUPP {
+			// There are no guarantees as to the contents of lowerXattrs.
+			return nil
+		}
+		ctx.Warningf("failed to copy up xattrs because ListXattrAt failed: %v", err)
+		return err
+	}
+
+	for _, name := range lowerXattrs {
+		// Do not copy up overlay attributes.
+		if isOverlayXattr(name) {
+			continue
+		}
+
+		value, err := vfsObj.GetXattrAt(ctx, d.fs.creds, lowerPop, &vfs.GetXattrOptions{Name: name, Size: 0})
+		if err != nil {
+			ctx.Warningf("failed to copy up xattrs because GetXattrAt failed: %v", err)
+			return err
+		}
+
+		if err := vfsObj.SetXattrAt(ctx, d.fs.creds, upperPop, &vfs.SetXattrOptions{Name: name, Value: value}); err != nil {
+			ctx.Warningf("failed to copy up xattrs because SetXattrAt failed: %v", err)
+			return err
+		}
+	}
 	return nil
 }

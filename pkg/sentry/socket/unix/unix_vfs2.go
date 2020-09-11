@@ -32,6 +32,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"gvisor.dev/gvisor/tools/go_marshal/marshal"
 )
 
 // SocketVFS2 implements socket.SocketVFS2 (and by extension,
@@ -89,13 +90,13 @@ func NewFileDescription(ep transport.Endpoint, stype linux.SockType, flags uint3
 
 // GetSockOpt implements the linux syscall getsockopt(2) for sockets backed by
 // a transport.Endpoint.
-func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level int, name int, outPtr usermem.Addr, outLen int) (interface{}, *syserr.Error) {
-	return netstack.GetSockOpt(t, s, s.ep, linux.AF_UNIX, s.ep.Type(), level, name, outLen)
+func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (marshal.Marshallable, *syserr.Error) {
+	return netstack.GetSockOpt(t, s, s.ep, linux.AF_UNIX, s.ep.Type(), level, name, outPtr, outLen)
 }
 
 // blockingAccept implements a blocking version of accept(2), that is, if no
 // connections are ready to be accept, it will block until one becomes ready.
-func (s *SocketVFS2) blockingAccept(t *kernel.Task) (transport.Endpoint, *syserr.Error) {
+func (s *SocketVFS2) blockingAccept(t *kernel.Task, peerAddr *tcpip.FullAddress) (transport.Endpoint, *syserr.Error) {
 	// Register for notifications.
 	e, ch := waiter.NewChannelEntry(nil)
 	s.socketOpsCommon.EventRegister(&e, waiter.EventIn)
@@ -104,7 +105,7 @@ func (s *SocketVFS2) blockingAccept(t *kernel.Task) (transport.Endpoint, *syserr
 	// Try to accept the connection; if it fails, then wait until we get a
 	// notification.
 	for {
-		if ep, err := s.ep.Accept(); err != syserr.ErrWouldBlock {
+		if ep, err := s.ep.Accept(peerAddr); err != syserr.ErrWouldBlock {
 			return ep, err
 		}
 
@@ -117,15 +118,18 @@ func (s *SocketVFS2) blockingAccept(t *kernel.Task) (transport.Endpoint, *syserr
 // Accept implements the linux syscall accept(2) for sockets backed by
 // a transport.Endpoint.
 func (s *SocketVFS2) Accept(t *kernel.Task, peerRequested bool, flags int, blocking bool) (int32, linux.SockAddr, uint32, *syserr.Error) {
-	// Issue the accept request to get the new endpoint.
-	ep, err := s.ep.Accept()
+	var peerAddr *tcpip.FullAddress
+	if peerRequested {
+		peerAddr = &tcpip.FullAddress{}
+	}
+	ep, err := s.ep.Accept(peerAddr)
 	if err != nil {
 		if err != syserr.ErrWouldBlock || !blocking {
 			return 0, nil, 0, err
 		}
 
 		var err *syserr.Error
-		ep, err = s.blockingAccept(t)
+		ep, err = s.blockingAccept(t, peerAddr)
 		if err != nil {
 			return 0, nil, 0, err
 		}
@@ -135,7 +139,7 @@ func (s *SocketVFS2) Accept(t *kernel.Task, peerRequested bool, flags int, block
 	if err != nil {
 		return 0, nil, 0, err
 	}
-	defer ns.DecRef()
+	defer ns.DecRef(t)
 
 	if flags&linux.SOCK_NONBLOCK != 0 {
 		ns.SetStatusFlags(t, t.Credentials(), linux.SOCK_NONBLOCK)
@@ -143,13 +147,8 @@ func (s *SocketVFS2) Accept(t *kernel.Task, peerRequested bool, flags int, block
 
 	var addr linux.SockAddr
 	var addrLen uint32
-	if peerRequested {
-		// Get address of the peer.
-		var err *syserr.Error
-		addr, addrLen, err = ns.Impl().(*SocketVFS2).GetPeerName(t)
-		if err != nil {
-			return 0, nil, 0, err
-		}
+	if peerAddr != nil {
+		addr, addrLen = netstack.ConvertAddress(linux.AF_UNIX, *peerAddr)
 	}
 
 	fd, e := t.NewFDFromVFS2(0, ns, kernel.FDFlags{
@@ -182,19 +181,23 @@ func (s *SocketVFS2) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
 			if t.IsNetworkNamespaced() {
 				return syserr.ErrInvalidEndpointState
 			}
-			if err := t.AbstractSockets().Bind(p[1:], bep, s); err != nil {
+			asn := t.AbstractSockets()
+			name := p[1:]
+			if err := asn.Bind(t, name, bep, s); err != nil {
 				// syserr.ErrPortInUse corresponds to EADDRINUSE.
 				return syserr.ErrPortInUse
 			}
+			s.abstractName = name
+			s.abstractNamespace = asn
 		} else {
 			path := fspath.Parse(p)
 			root := t.FSContext().RootDirectoryVFS2()
-			defer root.DecRef()
+			defer root.DecRef(t)
 			start := root
 			relPath := !path.Absolute
 			if relPath {
 				start = t.FSContext().WorkingDirectoryVFS2()
-				defer start.DecRef()
+				defer start.DecRef(t)
 			}
 			pop := vfs.PathOperation{
 				Root:  root,
@@ -332,7 +335,7 @@ func (*providerVFS2) Socket(t *kernel.Task, stype linux.SockType, protocol int) 
 
 	f, err := NewSockfsFile(t, ep, stype)
 	if err != nil {
-		ep.Close()
+		ep.Close(t)
 		return nil, err
 	}
 	return f, nil
@@ -356,14 +359,14 @@ func (*providerVFS2) Pair(t *kernel.Task, stype linux.SockType, protocol int) (*
 	ep1, ep2 := transport.NewPair(t, stype, t.Kernel())
 	s1, err := NewSockfsFile(t, ep1, stype)
 	if err != nil {
-		ep1.Close()
-		ep2.Close()
+		ep1.Close(t)
+		ep2.Close(t)
 		return nil, nil, err
 	}
 	s2, err := NewSockfsFile(t, ep2, stype)
 	if err != nil {
-		s1.DecRef()
-		ep2.Close()
+		s1.DecRef(t)
+		ep2.Close(t)
 		return nil, nil, err
 	}
 

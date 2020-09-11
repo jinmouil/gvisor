@@ -16,6 +16,8 @@ package gofer
 
 import (
 	"sync"
+	"sync/atomic"
+	"syscall"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
@@ -28,23 +30,29 @@ import (
 )
 
 // specialFileFD implements vfs.FileDescriptionImpl for pipes, sockets, device
-// special files, and (when filesystemOptions.specialRegularFiles is in effect)
-// regular files. specialFileFD differs from regularFileFD by using per-FD
-// handles instead of shared per-dentry handles, and never buffering I/O.
+// special files, and (when filesystemOptions.regularFilesUseSpecialFileFD is
+// in effect) regular files. specialFileFD differs from regularFileFD by using
+// per-FD handles instead of shared per-dentry handles, and never buffering I/O.
 type specialFileFD struct {
 	fileDescription
 
 	// handle is used for file I/O. handle is immutable.
 	handle handle
 
+	// isRegularFile is true if this FD represents a regular file which is only
+	// possible when filesystemOptions.regularFilesUseSpecialFileFD is in
+	// effect. isRegularFile is immutable.
+	isRegularFile bool
+
 	// seekable is true if this file description represents a file for which
-	// file offset is significant, i.e. a regular file. seekable is immutable.
+	// file offset is significant, i.e. a regular file, character device or
+	// block device. seekable is immutable.
 	seekable bool
 
-	// mayBlock is true if this file description represents a file for which
-	// queue may send I/O readiness events. mayBlock is immutable.
-	mayBlock bool
-	queue    waiter.Queue
+	// haveQueue is true if this file description represents a file for which
+	// queue may send I/O readiness events. haveQueue is immutable.
+	haveQueue bool
+	queue     waiter.Queue
 
 	// If seekable is true, off is the file offset. off is protected by mu.
 	mu  sync.Mutex
@@ -53,15 +61,16 @@ type specialFileFD struct {
 
 func newSpecialFileFD(h handle, mnt *vfs.Mount, d *dentry, locks *vfs.FileLocks, flags uint32) (*specialFileFD, error) {
 	ftype := d.fileType()
-	seekable := ftype == linux.S_IFREG
-	mayBlock := ftype == linux.S_IFIFO || ftype == linux.S_IFSOCK
+	seekable := ftype == linux.S_IFREG || ftype == linux.S_IFCHR || ftype == linux.S_IFBLK
+	haveQueue := (ftype == linux.S_IFIFO || ftype == linux.S_IFSOCK) && h.fd >= 0
 	fd := &specialFileFD{
-		handle:   h,
-		seekable: seekable,
-		mayBlock: mayBlock,
+		handle:        h,
+		isRegularFile: ftype == linux.S_IFREG,
+		seekable:      seekable,
+		haveQueue:     haveQueue,
 	}
 	fd.LockFD.Init(locks)
-	if mayBlock && h.fd >= 0 {
+	if haveQueue {
 		if err := fdnotifier.AddFD(h.fd, &fd.queue); err != nil {
 			return nil, err
 		}
@@ -70,7 +79,7 @@ func newSpecialFileFD(h handle, mnt *vfs.Mount, d *dentry, locks *vfs.FileLocks,
 		DenyPRead:  !seekable,
 		DenyPWrite: !seekable,
 	}); err != nil {
-		if mayBlock && h.fd >= 0 {
+		if haveQueue {
 			fdnotifier.RemoveFD(h.fd)
 		}
 		return nil, err
@@ -79,11 +88,11 @@ func newSpecialFileFD(h handle, mnt *vfs.Mount, d *dentry, locks *vfs.FileLocks,
 }
 
 // Release implements vfs.FileDescriptionImpl.Release.
-func (fd *specialFileFD) Release() {
-	if fd.mayBlock && fd.handle.fd >= 0 {
+func (fd *specialFileFD) Release(ctx context.Context) {
+	if fd.haveQueue {
 		fdnotifier.RemoveFD(fd.handle.fd)
 	}
-	fd.handle.close(context.Background())
+	fd.handle.close(ctx)
 	fs := fd.vfsfd.Mount().Filesystem().Impl().(*filesystem)
 	fs.syncMu.Lock()
 	delete(fs.specialFileFDs, fd)
@@ -100,7 +109,7 @@ func (fd *specialFileFD) OnClose(ctx context.Context) error {
 
 // Readiness implements waiter.Waitable.Readiness.
 func (fd *specialFileFD) Readiness(mask waiter.EventMask) waiter.EventMask {
-	if fd.mayBlock {
+	if fd.haveQueue {
 		return fdnotifier.NonBlockingPoll(fd.handle.fd, mask)
 	}
 	return fd.fileDescription.Readiness(mask)
@@ -108,8 +117,9 @@ func (fd *specialFileFD) Readiness(mask waiter.EventMask) waiter.EventMask {
 
 // EventRegister implements waiter.Waitable.EventRegister.
 func (fd *specialFileFD) EventRegister(e *waiter.Entry, mask waiter.EventMask) {
-	if fd.mayBlock {
+	if fd.haveQueue {
 		fd.queue.EventRegister(e, mask)
+		fdnotifier.UpdateFD(fd.handle.fd)
 		return
 	}
 	fd.fileDescription.EventRegister(e, mask)
@@ -117,8 +127,9 @@ func (fd *specialFileFD) EventRegister(e *waiter.Entry, mask waiter.EventMask) {
 
 // EventUnregister implements waiter.Waitable.EventUnregister.
 func (fd *specialFileFD) EventUnregister(e *waiter.Entry) {
-	if fd.mayBlock {
+	if fd.haveQueue {
 		fd.queue.EventUnregister(e)
+		fdnotifier.UpdateFD(fd.handle.fd)
 		return
 	}
 	fd.fileDescription.EventUnregister(e)
@@ -130,7 +141,9 @@ func (fd *specialFileFD) PRead(ctx context.Context, dst usermem.IOSequence, offs
 		return 0, syserror.EINVAL
 	}
 
-	// Check that flags are supported. Silently ignore RWF_HIPRI.
+	// Check that flags are supported.
+	//
+	// TODO(gvisor.dev/issue/2601): Support select preadv2 flags.
 	if opts.Flags&^linux.RWF_HIPRI != 0 {
 		return 0, syserror.EOPNOTSUPP
 	}
@@ -140,7 +153,7 @@ func (fd *specialFileFD) PRead(ctx context.Context, dst usermem.IOSequence, offs
 	// mmap due to lock ordering; MM locks precede dentry.dataMu. That doesn't
 	// hold here since specialFileFD doesn't client-cache data. Just buffer the
 	// read instead.
-	if d := fd.dentry(); d.fs.opts.interop != InteropModeShared {
+	if d := fd.dentry(); d.cachedMetadataAuthoritative() {
 		d.touchAtime(fd.vfsfd.Mount())
 	}
 	buf := make([]byte, dst.NumBytes())
@@ -172,37 +185,78 @@ func (fd *specialFileFD) Read(ctx context.Context, dst usermem.IOSequence, opts 
 
 // PWrite implements vfs.FileDescriptionImpl.PWrite.
 func (fd *specialFileFD) PWrite(ctx context.Context, src usermem.IOSequence, offset int64, opts vfs.WriteOptions) (int64, error) {
+	n, _, err := fd.pwrite(ctx, src, offset, opts)
+	return n, err
+}
+
+// pwrite returns the number of bytes written, final offset, error. The final
+// offset should be ignored by PWrite.
+func (fd *specialFileFD) pwrite(ctx context.Context, src usermem.IOSequence, offset int64, opts vfs.WriteOptions) (written, finalOff int64, err error) {
 	if fd.seekable && offset < 0 {
-		return 0, syserror.EINVAL
+		return 0, offset, syserror.EINVAL
 	}
 
-	// Check that flags are supported. Silently ignore RWF_HIPRI.
+	// Check that flags are supported.
+	//
+	// TODO(gvisor.dev/issue/2601): Support select pwritev2 flags.
 	if opts.Flags&^linux.RWF_HIPRI != 0 {
-		return 0, syserror.EOPNOTSUPP
+		return 0, offset, syserror.EOPNOTSUPP
 	}
 
-	if fd.seekable {
+	d := fd.dentry()
+	// If the regular file fd was opened with O_APPEND, make sure the file size
+	// is updated. There is a possible race here if size is modified externally
+	// after metadata cache is updated.
+	if fd.isRegularFile && fd.vfsfd.StatusFlags()&linux.O_APPEND != 0 && !d.cachedMetadataAuthoritative() {
+		if err := d.updateFromGetattr(ctx); err != nil {
+			return 0, offset, err
+		}
+	}
+
+	if fd.isRegularFile {
+		// We need to hold the metadataMu *while* writing to a regular file.
+		d.metadataMu.Lock()
+		defer d.metadataMu.Unlock()
+
+		// Set offset to file size if the regular file was opened with O_APPEND.
+		if fd.vfsfd.StatusFlags()&linux.O_APPEND != 0 {
+			// Holding d.metadataMu is sufficient for reading d.size.
+			offset = int64(d.size)
+		}
 		limit, err := vfs.CheckLimit(ctx, offset, src.NumBytes())
 		if err != nil {
-			return 0, err
+			return 0, offset, err
 		}
 		src = src.TakeFirst64(limit)
 	}
 
 	// Do a buffered write. See rationale in PRead.
-	if d := fd.dentry(); d.fs.opts.interop != InteropModeShared {
+	if d.cachedMetadataAuthoritative() {
 		d.touchCMtime()
 	}
 	buf := make([]byte, src.NumBytes())
 	// Don't do partial writes if we get a partial read from src.
 	if _, err := src.CopyIn(ctx, buf); err != nil {
-		return 0, err
+		return 0, offset, err
 	}
 	n, err := fd.handle.writeFromBlocksAt(ctx, safemem.BlockSeqOf(safemem.BlockFromSafeSlice(buf)), uint64(offset))
 	if err == syserror.EAGAIN {
 		err = syserror.ErrWouldBlock
 	}
-	return int64(n), err
+	// Update offset if the offset is valid.
+	if offset >= 0 {
+		offset += int64(n)
+	}
+	// Update file size for regular files.
+	if fd.isRegularFile {
+		// d.metadataMu is already locked at this point.
+		if uint64(offset) > d.size {
+			d.dataMu.Lock()
+			defer d.dataMu.Unlock()
+			atomic.StoreUint64(&d.size, uint64(offset))
+		}
+	}
+	return int64(n), offset, err
 }
 
 // Write implements vfs.FileDescriptionImpl.Write.
@@ -212,8 +266,8 @@ func (fd *specialFileFD) Write(ctx context.Context, src usermem.IOSequence, opts
 	}
 
 	fd.mu.Lock()
-	n, err := fd.PWrite(ctx, src, fd.off, opts)
-	fd.off += n
+	n, off, err := fd.pwrite(ctx, src, fd.off, opts)
+	fd.off = off
 	fd.mu.Unlock()
 	return n, err
 }
@@ -235,8 +289,13 @@ func (fd *specialFileFD) Seek(ctx context.Context, offset int64, whence int32) (
 
 // Sync implements vfs.FileDescriptionImpl.Sync.
 func (fd *specialFileFD) Sync(ctx context.Context) error {
-	if !fd.vfsfd.IsWritable() {
-		return nil
+	// If we have a host FD, fsyncing it is likely to be faster than an fsync
+	// RPC.
+	if fd.handle.fd >= 0 {
+		ctx.UninterruptibleSleepStart(false)
+		err := syscall.Fsync(int(fd.handle.fd))
+		ctx.UninterruptibleSleepFinish(false)
+		return err
 	}
-	return fd.handle.sync(ctx)
+	return fd.handle.file.fsync(ctx)
 }

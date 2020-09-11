@@ -1,10 +1,6 @@
 package state
 
 import (
-	__generics_imported0 "reflect"
-)
-
-import (
 	"bytes"
 	"fmt"
 )
@@ -236,7 +232,7 @@ func (s *addrSet) UpperBoundGap(max uintptr) addrGapIterator {
 // segment can be merged with adjacent segments, Add will do so. If the new
 // segment would overlap an existing segment, Add returns false. If Add
 // succeeds, all existing iterators are invalidated.
-func (s *addrSet) Add(r addrRange, val __generics_imported0.Value) bool {
+func (s *addrSet) Add(r addrRange, val *objectEncodeState) bool {
 	if r.Length() <= 0 {
 		panic(fmt.Sprintf("invalid segment range %v", r))
 	}
@@ -255,7 +251,7 @@ func (s *addrSet) Add(r addrRange, val __generics_imported0.Value) bool {
 // If it would overlap an existing segment, AddWithoutMerging does nothing and
 // returns false. If AddWithoutMerging succeeds, all existing iterators are
 // invalidated.
-func (s *addrSet) AddWithoutMerging(r addrRange, val __generics_imported0.Value) bool {
+func (s *addrSet) AddWithoutMerging(r addrRange, val *objectEncodeState) bool {
 	if r.Length() <= 0 {
 		panic(fmt.Sprintf("invalid segment range %v", r))
 	}
@@ -282,7 +278,7 @@ func (s *addrSet) AddWithoutMerging(r addrRange, val __generics_imported0.Value)
 // Merge, but may be more efficient. Note that there is no unchecked variant of
 // Insert since Insert must retrieve and inspect gap's predecessor and
 // successor segments regardless.
-func (s *addrSet) Insert(gap addrGapIterator, r addrRange, val __generics_imported0.Value) addrIterator {
+func (s *addrSet) Insert(gap addrGapIterator, r addrRange, val *objectEncodeState) addrIterator {
 	if r.Length() <= 0 {
 		panic(fmt.Sprintf("invalid segment range %v", r))
 	}
@@ -333,7 +329,7 @@ func (s *addrSet) Insert(gap addrGapIterator, r addrRange, val __generics_import
 //
 // If the gap cannot accommodate the segment, or if r is invalid,
 // InsertWithoutMerging panics.
-func (s *addrSet) InsertWithoutMerging(gap addrGapIterator, r addrRange, val __generics_imported0.Value) addrIterator {
+func (s *addrSet) InsertWithoutMerging(gap addrGapIterator, r addrRange, val *objectEncodeState) addrIterator {
 	if r.Length() <= 0 {
 		panic(fmt.Sprintf("invalid segment range %v", r))
 	}
@@ -347,8 +343,10 @@ func (s *addrSet) InsertWithoutMerging(gap addrGapIterator, r addrRange, val __g
 // and returns an iterator to the inserted segment. All existing iterators
 // (including gap, but not including the returned iterator) are invalidated.
 //
-// Preconditions: r.Start >= gap.Start(); r.End <= gap.End().
-func (s *addrSet) InsertWithoutMergingUnchecked(gap addrGapIterator, r addrRange, val __generics_imported0.Value) addrIterator {
+// Preconditions:
+// * r.Start >= gap.Start().
+// * r.End <= gap.End().
+func (s *addrSet) InsertWithoutMergingUnchecked(gap addrGapIterator, r addrRange, val *objectEncodeState) addrIterator {
 	gap = gap.node.rebalanceBeforeInsert(gap)
 	splitMaxGap := addrtrackGaps != 0 && (gap.node.nrSegments == 0 || gap.Range().Length() == gap.node.maxGap.Get())
 	copy(gap.node.keys[gap.index+1:], gap.node.keys[gap.index:gap.node.nrSegments])
@@ -621,7 +619,7 @@ type addrnode struct {
 	// Nodes store keys and values in separate arrays to maximize locality in
 	// the common case (scanning keys for lookup).
 	keys     [addrmaxDegree - 1]addrRange
-	values   [addrmaxDegree - 1]__generics_imported0.Value
+	values   [addrmaxDegree - 1]*objectEncodeState
 	children [addrmaxDegree]*addrnode
 }
 
@@ -1101,12 +1099,10 @@ func (seg addrIterator) End() uintptr {
 // does not invalidate any iterators.
 //
 // Preconditions:
-//
-// - r.Length() > 0.
-//
-// - The new range must not overlap an existing one: If seg.NextSegment().Ok(),
-// then r.end <= seg.NextSegment().Start(); if seg.PrevSegment().Ok(), then
-// r.start >= seg.PrevSegment().End().
+// * r.Length() > 0.
+// * The new range must not overlap an existing one:
+//   * If seg.NextSegment().Ok(), then r.end <= seg.NextSegment().Start().
+//   * If seg.PrevSegment().Ok(), then r.start >= seg.PrevSegment().End().
 func (seg addrIterator) SetRangeUnchecked(r addrRange) {
 	seg.node.keys[seg.index] = r
 }
@@ -1131,8 +1127,9 @@ func (seg addrIterator) SetRange(r addrRange) {
 // SetStartUnchecked mutates the iterated segment's start. This operation does
 // not invalidate any iterators.
 //
-// Preconditions: The new start must be valid: start < seg.End(); if
-// seg.PrevSegment().Ok(), then start >= seg.PrevSegment().End().
+// Preconditions: The new start must be valid:
+// * start < seg.End()
+// * If seg.PrevSegment().Ok(), then start >= seg.PrevSegment().End().
 func (seg addrIterator) SetStartUnchecked(start uintptr) {
 	seg.node.keys[seg.index].Start = start
 }
@@ -1154,8 +1151,9 @@ func (seg addrIterator) SetStart(start uintptr) {
 // SetEndUnchecked mutates the iterated segment's end. This operation does not
 // invalidate any iterators.
 //
-// Preconditions: The new end must be valid: end > seg.Start(); if
-// seg.NextSegment().Ok(), then end <= seg.NextSegment().Start().
+// Preconditions: The new end must be valid:
+// * end > seg.Start().
+// * If seg.NextSegment().Ok(), then end <= seg.NextSegment().Start().
 func (seg addrIterator) SetEndUnchecked(end uintptr) {
 	seg.node.keys[seg.index].End = end
 }
@@ -1175,20 +1173,20 @@ func (seg addrIterator) SetEnd(end uintptr) {
 }
 
 // Value returns a copy of the iterated segment's value.
-func (seg addrIterator) Value() __generics_imported0.Value {
+func (seg addrIterator) Value() *objectEncodeState {
 	return seg.node.values[seg.index]
 }
 
 // ValuePtr returns a pointer to the iterated segment's value. The pointer is
 // invalidated if the iterator is invalidated. This operation does not
 // invalidate any iterators.
-func (seg addrIterator) ValuePtr() *__generics_imported0.Value {
+func (seg addrIterator) ValuePtr() **objectEncodeState {
 	return &seg.node.values[seg.index]
 }
 
 // SetValue mutates the iterated segment's value. This operation does not
 // invalidate any iterators.
-func (seg addrIterator) SetValue(val __generics_imported0.Value) {
+func (seg addrIterator) SetValue(val *objectEncodeState) {
 	seg.node.values[seg.index] = val
 }
 
@@ -1492,7 +1490,7 @@ func addrsegmentAfterPosition(n *addrnode, i int) addrIterator {
 	return addrIterator{n, i}
 }
 
-func addrzeroValueSlice(slice []__generics_imported0.Value) {
+func addrzeroValueSlice(slice []*objectEncodeState) {
 
 	for i := range slice {
 		addrSetFunctions{}.ClearValue(&slice[i])
@@ -1555,7 +1553,7 @@ func (n *addrnode) writeDebugString(buf *bytes.Buffer, prefix string) {
 type addrSegmentDataSlices struct {
 	Start  []uintptr
 	End    []uintptr
-	Values []__generics_imported0.Value
+	Values []*objectEncodeState
 }
 
 // ExportSortedSlice returns a copy of all segments in the given set, in ascending
@@ -1575,9 +1573,11 @@ func (s *addrSet) ExportSortedSlices() *addrSegmentDataSlices {
 
 // ImportSortedSlice initializes the given set from the given slice.
 //
-// Preconditions: s must be empty. sds must represent a valid set (the segments
-// in sds must have valid lengths that do not overlap). The segments in sds
-// must be sorted in ascending key order.
+// Preconditions:
+// * s must be empty.
+// * sds must represent a valid set (the segments in sds must have valid
+//   lengths that do not overlap).
+// * The segments in sds must be sorted in ascending key order.
 func (s *addrSet) ImportSortedSlices(sds *addrSegmentDataSlices) error {
 	if !s.IsEmpty() {
 		return fmt.Errorf("cannot import into non-empty set %v", s)
@@ -1599,7 +1599,7 @@ func (s *addrSet) ImportSortedSlices(sds *addrSegmentDataSlices) error {
 //
 // This should be used only for testing, and has been added to this package for
 // templating convenience.
-func (s *addrSet) segmentTestCheck(expectedSegments int, segFunc func(int, addrRange, __generics_imported0.Value) error) error {
+func (s *addrSet) segmentTestCheck(expectedSegments int, segFunc func(int, addrRange, *objectEncodeState) error) error {
 	havePrev := false
 	prev := uintptr(0)
 	nrSegments := 0

@@ -93,10 +93,6 @@ func (e *endpoint) beforeSave() {
 	if e.waiterQueue != nil && !e.waiterQueue.IsEmpty() {
 		panic("endpoint still has waiters upon save")
 	}
-
-	if e.EndpointState() != StateClose && !((e.EndpointState() == StateBound || e.EndpointState() == StateListen) == e.isPortReserved) {
-		panic("endpoints which are not in the closed state must have a reserved port IFF they are in bound or listen state")
-	}
 }
 
 // saveAcceptedChan is invoked by stateify.
@@ -186,26 +182,33 @@ func (e *endpoint) Resume(s *stack.Stack) {
 	epState := e.origEndpointState
 	switch epState {
 	case StateInitial, StateBound, StateListen, StateConnecting, StateEstablished:
-		var ss tcpip.StackSendBufferSizeOption
+		var ss tcpip.TCPSendBufferSizeRangeOption
 		if err := e.stack.TransportProtocolOption(ProtocolNumber, &ss); err == nil {
 			if e.sndBufSize < ss.Min || e.sndBufSize > ss.Max {
 				panic(fmt.Sprintf("endpoint.sndBufSize %d is outside the min and max allowed [%d, %d]", e.sndBufSize, ss.Min, ss.Max))
 			}
-			if e.rcvBufSize < ss.Min || e.rcvBufSize > ss.Max {
-				panic(fmt.Sprintf("endpoint.rcvBufSize %d is outside the min and max allowed [%d, %d]", e.rcvBufSize, ss.Min, ss.Max))
+		}
+
+		var rs tcpip.TCPReceiveBufferSizeRangeOption
+		if err := e.stack.TransportProtocolOption(ProtocolNumber, &rs); err == nil {
+			if e.rcvBufSize < rs.Min || e.rcvBufSize > rs.Max {
+				panic(fmt.Sprintf("endpoint.rcvBufSize %d is outside the min and max allowed [%d, %d]", e.rcvBufSize, rs.Min, rs.Max))
 			}
 		}
 	}
 
 	bind := func() {
-		if len(e.BindAddr) == 0 {
-			e.BindAddr = e.ID.LocalAddress
+		addr, _, err := e.checkV4MappedLocked(tcpip.FullAddress{Addr: e.BindAddr, Port: e.ID.LocalPort})
+		if err != nil {
+			panic("unable to parse BindAddr: " + err.String())
 		}
-		addr := e.BindAddr
-		port := e.ID.LocalPort
-		if err := e.Bind(tcpip.FullAddress{Addr: addr, Port: port}); err != nil {
-			panic(fmt.Sprintf("endpoint binding [%v]:%d failed: %v", addr, port, err))
+		if ok := e.stack.ReserveTuple(e.effectiveNetProtos, ProtocolNumber, addr.Addr, addr.Port, e.boundPortFlags, e.boundBindToDevice, e.boundDest); !ok {
+			panic(fmt.Sprintf("unable to re-reserve tuple (%v, %q, %d, %+v, %d, %v)", e.effectiveNetProtos, addr.Addr, addr.Port, e.boundPortFlags, e.boundBindToDevice, e.boundDest))
 		}
+		e.isPortReserved = true
+
+		// Mark endpoint as bound.
+		e.setEndpointState(StateBound)
 	}
 
 	switch {
@@ -277,17 +280,7 @@ func (e *endpoint) Resume(s *stack.Stack) {
 			tcpip.AsyncLoading.Done()
 		}()
 	case epState == StateClose:
-		if e.isPortReserved {
-			tcpip.AsyncLoading.Add(1)
-			go func() {
-				connectedLoading.Wait()
-				listenLoading.Wait()
-				connectingLoading.Wait()
-				bind()
-				e.setEndpointState(StateClose)
-				tcpip.AsyncLoading.Done()
-			}()
-		}
+		e.isPortReserved = false
 		e.state = StateClose
 		e.stack.CompleteTransportEndpointCleanup(e)
 		tcpip.DeleteDanglingEndpoint(e)
@@ -314,6 +307,16 @@ func (e *endpoint) loadLastError(s string) {
 	}
 
 	e.lastError = tcpip.StringToError(s)
+}
+
+// saveRecentTSTime is invoked by stateify.
+func (e *endpoint) saveRecentTSTime() unixTime {
+	return unixTime{e.recentTSTime.Unix(), e.recentTSTime.UnixNano()}
+}
+
+// loadRecentTSTime is invoked by stateify.
+func (e *endpoint) loadRecentTSTime(unix unixTime) {
+	e.recentTSTime = time.Unix(unix.second, unix.nano)
 }
 
 // saveHardError is invoked by stateify.

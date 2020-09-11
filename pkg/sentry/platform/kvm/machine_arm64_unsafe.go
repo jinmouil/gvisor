@@ -26,6 +26,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/platform/ring0"
+	"gvisor.dev/gvisor/pkg/sentry/platform/ring0/pagetables"
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
@@ -60,7 +61,6 @@ func (c *vCPU) initArchState() error {
 	reg.addr = uint64(reflect.ValueOf(&data).Pointer())
 	regGet.addr = uint64(reflect.ValueOf(&dataGet).Pointer())
 
-	vcpuInit.target = _KVM_ARM_TARGET_GENERIC_V8
 	vcpuInit.features[0] |= (1 << _KVM_ARM_VCPU_PSCI_0_2)
 	if _, _, errno := syscall.RawSyscall(
 		syscall.SYS_IOCTL,
@@ -74,19 +74,6 @@ func (c *vCPU) initArchState() error {
 	reg.id = _KVM_ARM64_REGS_CPACR_EL1
 	// It is off by default, and it is turned on only when in use.
 	data = 0 // Disable fpsimd.
-	if err := c.setOneRegister(&reg); err != nil {
-		return err
-	}
-
-	// sctlr_el1
-	regGet.id = _KVM_ARM64_REGS_SCTLR_EL1
-	if err := c.getOneRegister(&regGet); err != nil {
-		return err
-	}
-
-	dataGet |= (_SCTLR_M | _SCTLR_C | _SCTLR_I)
-	data = dataGet
-	reg.id = _KVM_ARM64_REGS_SCTLR_EL1
 	if err := c.setOneRegister(&reg); err != nil {
 		return err
 	}
@@ -163,10 +150,12 @@ func (c *vCPU) initArchState() error {
 	// the MMIO address base.
 	arm64HypercallMMIOBase = toLocation
 
-	data = ring0.PsrDefaultSet | ring0.KernelFlagsSet
-	reg.id = _KVM_ARM64_REGS_PSTATE
-	if err := c.setOneRegister(&reg); err != nil {
-		return err
+	// Initialize the PCID database.
+	if hasGuestPCID {
+		// Note that NewPCIDs may return a nil table here, in which
+		// case we simply don't use PCID support (see below). In
+		// practice, this should not happen, however.
+		c.PCIDs = pagetables.NewPCIDs(fixedKernelPCID+1, poolPCIDs)
 	}
 
 	c.floatingPointState = arch.NewFloatingPointData()
@@ -247,6 +236,13 @@ func (c *vCPU) SwitchToUser(switchOpts ring0.SwitchOpts, info *arch.SignalInfo) 
 		return nonCanonical(regs.Sp, int32(syscall.SIGBUS), info)
 	}
 
+	// Assign PCIDs.
+	if c.PCIDs != nil {
+		var requireFlushPCID bool // Force a flush?
+		switchOpts.UserASID, requireFlushPCID = c.PCIDs.Assign(switchOpts.PageTables)
+		switchOpts.Flush = switchOpts.Flush || requireFlushPCID
+	}
+
 	var vector ring0.Vector
 	ttbr0App := switchOpts.PageTables.TTBR0_EL1(false, 0)
 	c.SetTtbr0App(uintptr(ttbr0App))
@@ -275,8 +271,16 @@ func (c *vCPU) SwitchToUser(switchOpts ring0.SwitchOpts, info *arch.SignalInfo) 
 		return c.fault(int32(syscall.SIGSEGV), info)
 	case ring0.Vector(bounce): // ring0.VirtualizationException
 		return usermem.NoAccess, platform.ErrContextInterrupt
+	case ring0.El0Sync_undef,
+		ring0.El1Sync_undef:
+		*info = arch.SignalInfo{
+			Signo: int32(syscall.SIGILL),
+			Code:  1, // ILL_ILLOPC (illegal opcode).
+		}
+		info.SetAddr(switchOpts.Registers.Pc) // Include address.
+		return usermem.AccessType{}, platform.ErrContextSignal
 	default:
-		return usermem.NoAccess, platform.ErrContextSignal
+		panic(fmt.Sprintf("unexpected vector: 0x%x", vector))
 	}
 
 }

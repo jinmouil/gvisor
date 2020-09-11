@@ -20,6 +20,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/fs/lock"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/fasync"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/pipe"
 	slinux "gvisor.dev/gvisor/pkg/sentry/syscalls/linux"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -33,11 +34,11 @@ func Close(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	// Note that Remove provides a reference on the file that we may use to
 	// flush. It is still active until we drop the final reference below
 	// (and other reference-holding operations complete).
-	_, file := t.FDTable().Remove(fd)
+	_, file := t.FDTable().Remove(t, fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	err := file.OnClose(t)
 	return 0, nil, slinux.HandleIOErrorVFS2(t, false /* partial */, err, syserror.EINTR, "close", file)
@@ -51,7 +52,7 @@ func Dup(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallCo
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	newFD, err := t.NewFDFromVFS2(0, file, kernel.FDFlags{})
 	if err != nil {
@@ -71,7 +72,7 @@ func Dup2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 		if file == nil {
 			return 0, nil, syserror.EBADF
 		}
-		file.DecRef()
+		file.DecRef(t)
 		return uintptr(newfd), nil, nil
 	}
 
@@ -100,7 +101,7 @@ func dup3(t *kernel.Task, oldfd, newfd int32, flags uint32) (uintptr, *kernel.Sy
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	err := t.NewFDAtVFS2(newfd, file, kernel.FDFlags{
 		CloseOnExec: flags&linux.O_CLOEXEC != 0,
@@ -120,7 +121,7 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	switch cmd {
 	case linux.F_DUPFD, linux.F_DUPFD_CLOEXEC:
@@ -136,7 +137,7 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		return uintptr(flags.ToLinuxFDFlags()), nil, nil
 	case linux.F_SETFD:
 		flags := args[2].Uint()
-		err := t.FDTable().SetFlagsVFS2(fd, kernel.FDFlags{
+		err := t.FDTable().SetFlagsVFS2(t, fd, kernel.FDFlags{
 			CloseOnExec: flags&linux.FD_CLOEXEC != 0,
 		})
 		return 0, nil, err
@@ -154,6 +155,41 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 			return 0, nil, err
 		}
 		return uintptr(n), nil, nil
+	case linux.F_GETOWN:
+		owner, hasOwner := getAsyncOwner(t, file)
+		if !hasOwner {
+			return 0, nil, nil
+		}
+		if owner.Type == linux.F_OWNER_PGRP {
+			return uintptr(-owner.PID), nil, nil
+		}
+		return uintptr(owner.PID), nil, nil
+	case linux.F_SETOWN:
+		who := args[2].Int()
+		ownerType := int32(linux.F_OWNER_PID)
+		if who < 0 {
+			// Check for overflow before flipping the sign.
+			if who-1 > who {
+				return 0, nil, syserror.EINVAL
+			}
+			ownerType = linux.F_OWNER_PGRP
+			who = -who
+		}
+		return 0, nil, setAsyncOwner(t, file, ownerType, who)
+	case linux.F_GETOWN_EX:
+		owner, hasOwner := getAsyncOwner(t, file)
+		if !hasOwner {
+			return 0, nil, nil
+		}
+		_, err := t.CopyOut(args[2].Pointer(), &owner)
+		return 0, nil, err
+	case linux.F_SETOWN_EX:
+		var owner linux.FOwnerEx
+		_, err := t.CopyIn(args[2].Pointer(), &owner)
+		if err != nil {
+			return 0, nil, err
+		}
+		return 0, nil, setAsyncOwner(t, file, owner.Type, owner.PID)
 	case linux.F_GETPIPE_SZ:
 		pipefile, ok := file.Impl().(*pipe.VFSPipeFD)
 		if !ok {
@@ -172,8 +208,77 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	case linux.F_SETLK, linux.F_SETLKW:
 		return 0, nil, posixLock(t, args, file, cmd)
 	default:
-		// TODO(gvisor.dev/issue/2920): Everything else is not yet supported.
+		// Everything else is not yet supported.
 		return 0, nil, syserror.EINVAL
+	}
+}
+
+func getAsyncOwner(t *kernel.Task, fd *vfs.FileDescription) (ownerEx linux.FOwnerEx, hasOwner bool) {
+	a := fd.AsyncHandler()
+	if a == nil {
+		return linux.FOwnerEx{}, false
+	}
+
+	ot, otg, opg := a.(*fasync.FileAsync).Owner()
+	switch {
+	case ot != nil:
+		return linux.FOwnerEx{
+			Type: linux.F_OWNER_TID,
+			PID:  int32(t.PIDNamespace().IDOfTask(ot)),
+		}, true
+	case otg != nil:
+		return linux.FOwnerEx{
+			Type: linux.F_OWNER_PID,
+			PID:  int32(t.PIDNamespace().IDOfThreadGroup(otg)),
+		}, true
+	case opg != nil:
+		return linux.FOwnerEx{
+			Type: linux.F_OWNER_PGRP,
+			PID:  int32(t.PIDNamespace().IDOfProcessGroup(opg)),
+		}, true
+	default:
+		return linux.FOwnerEx{}, true
+	}
+}
+
+func setAsyncOwner(t *kernel.Task, fd *vfs.FileDescription, ownerType, pid int32) error {
+	switch ownerType {
+	case linux.F_OWNER_TID, linux.F_OWNER_PID, linux.F_OWNER_PGRP:
+		// Acceptable type.
+	default:
+		return syserror.EINVAL
+	}
+
+	a := fd.SetAsyncHandler(fasync.NewVFS2).(*fasync.FileAsync)
+	if pid == 0 {
+		a.ClearOwner()
+		return nil
+	}
+
+	switch ownerType {
+	case linux.F_OWNER_TID:
+		task := t.PIDNamespace().TaskWithID(kernel.ThreadID(pid))
+		if task == nil {
+			return syserror.ESRCH
+		}
+		a.SetOwnerTask(t, task)
+		return nil
+	case linux.F_OWNER_PID:
+		tg := t.PIDNamespace().ThreadGroupWithID(kernel.ThreadID(pid))
+		if tg == nil {
+			return syserror.ESRCH
+		}
+		a.SetOwnerThreadGroup(t, tg)
+		return nil
+	case linux.F_OWNER_PGRP:
+		pg := t.PIDNamespace().ProcessGroupWithID(kernel.ProcessGroupID(pid))
+		if pg == nil {
+			return syserror.ESRCH
+		}
+		a.SetOwnerProcessGroup(t, pg)
+		return nil
+	default:
+		return syserror.EINVAL
 	}
 }
 
@@ -227,7 +332,7 @@ func Fadvise64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	// If the FD refers to a pipe or FIFO, return error.
 	if _, isPipe := file.Impl().(*pipe.VFSPipeFD); isPipe {

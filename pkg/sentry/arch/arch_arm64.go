@@ -73,6 +73,8 @@ const (
 )
 
 // context64 represents an ARM64 context.
+//
+// +stateify savable
 type context64 struct {
 	State
 	sigFPState []aarch64FPState // fpstate to be restored on sigreturn.
@@ -142,7 +144,7 @@ func (c *context64) SetStack(value uintptr) {
 
 // TLS returns the current TLS pointer.
 func (c *context64) TLS() uintptr {
-	return uintptr(c.TPValue)
+	return uintptr(c.Regs.TPIDR_EL0)
 }
 
 // SetTLS sets the current TLS pointer. Returns false if value is invalid.
@@ -151,7 +153,7 @@ func (c *context64) SetTLS(value uintptr) bool {
 		return false
 	}
 
-	c.TPValue = uint64(value)
+	c.Regs.TPIDR_EL0 = uint64(value)
 	return true
 }
 

@@ -37,11 +37,13 @@ const (
 //
 // +stateify savable
 type tasksInode struct {
-	kernfs.InodeNotSymlink
-	kernfs.InodeDirectoryNoNewChildren
-	kernfs.InodeAttrs
-	kernfs.OrderedChildren
+	implStatFS
 	kernfs.AlwaysValid
+	kernfs.InodeAttrs
+	kernfs.InodeDirectoryNoNewChildren
+	kernfs.InodeNotSymlink
+	kernfs.OrderedChildren
+	tasksInodeRefs
 
 	locks vfs.FileLocks
 
@@ -84,6 +86,7 @@ func (fs *filesystem) newTasksInode(k *kernel.Kernel, pidns *kernel.PIDNamespace
 		cgroupControllers: cgroupControllers,
 	}
 	inode.InodeAttrs.Init(root, linux.UNNAMED_MAJOR, fs.devMinor, fs.NextIno(), linux.ModeDirectory|0555)
+	inode.EnableLeakCheck()
 
 	dentry := &kernfs.Dentry{}
 	dentry.Init(inode)
@@ -199,15 +202,17 @@ func (i *tasksInode) IterDirents(ctx context.Context, cb vfs.IterDirentsCallback
 
 // Open implements kernfs.Inode.
 func (i *tasksInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &i.locks, &opts)
+	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &i.locks, &opts, kernfs.GenericDirectoryFDOptions{
+		SeekEnd: kernfs.SeekEndZero,
+	})
 	if err != nil {
 		return nil, err
 	}
 	return fd.VFSFileDescription(), nil
 }
 
-func (i *tasksInode) Stat(vsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
-	stat, err := i.InodeAttrs.Stat(vsfs, opts)
+func (i *tasksInode) Stat(ctx context.Context, vsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
+	stat, err := i.InodeAttrs.Stat(ctx, vsfs, opts)
 	if err != nil {
 		return linux.Statx{}, err
 	}
@@ -222,6 +227,11 @@ func (i *tasksInode) Stat(vsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Sta
 	}
 
 	return stat, nil
+}
+
+// DecRef implements kernfs.Inode.
+func (i *tasksInode) DecRef(context.Context) {
+	i.tasksInodeRefs.DecRef(i.Destroy)
 }
 
 // staticFileSetStat implements a special static file that allows inode

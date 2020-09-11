@@ -18,6 +18,7 @@ package devtmpfs
 
 import (
 	"fmt"
+	"path"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
@@ -79,7 +80,7 @@ type Accessor struct {
 // NewAccessor returns an Accessor that supports creation of device special
 // files in the devtmpfs instance registered with name fsTypeName in vfsObj.
 func NewAccessor(ctx context.Context, vfsObj *vfs.VirtualFilesystem, creds *auth.Credentials, fsTypeName string) (*Accessor, error) {
-	mntns, err := vfsObj.NewMountNamespace(ctx, creds, "devtmpfs" /* source */, fsTypeName, &vfs.GetFilesystemOptions{})
+	mntns, err := vfsObj.NewMountNamespace(ctx, creds, "devtmpfs" /* source */, fsTypeName, &vfs.MountOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -92,9 +93,9 @@ func NewAccessor(ctx context.Context, vfsObj *vfs.VirtualFilesystem, creds *auth
 }
 
 // Release must be called when a is no longer in use.
-func (a *Accessor) Release() {
-	a.root.DecRef()
-	a.mntns.DecRef()
+func (a *Accessor) Release(ctx context.Context) {
+	a.root.DecRef(ctx)
+	a.mntns.DecRef(ctx)
 }
 
 // accessorContext implements context.Context by extending an existing
@@ -136,6 +137,8 @@ func (a *Accessor) pathOperationAt(pathname string) *vfs.PathOperation {
 // CreateDeviceFile creates a device special file at the given pathname in the
 // devtmpfs instance accessed by the Accessor.
 func (a *Accessor) CreateDeviceFile(ctx context.Context, pathname string, kind vfs.DeviceKind, major, minor uint32, perms uint16) error {
+	actx := a.wrapContext(ctx)
+
 	mode := (linux.FileMode)(perms)
 	switch kind {
 	case vfs.BlockDevice:
@@ -145,12 +148,22 @@ func (a *Accessor) CreateDeviceFile(ctx context.Context, pathname string, kind v
 	default:
 		panic(fmt.Sprintf("invalid vfs.DeviceKind: %v", kind))
 	}
+
+	// Create any parent directories. See
+	// devtmpfs.c:handle_create()=>path_create().
+	parent := path.Dir(pathname)
+	if err := a.vfsObj.MkdirAllAt(ctx, parent, a.root, a.creds, &vfs.MkdirOptions{
+		Mode: 0755,
+	}); err != nil {
+		return fmt.Errorf("failed to create device parent directory %q: %v", parent, err)
+	}
+
 	// NOTE: Linux's devtmpfs refuses to automatically delete files it didn't
 	// create, which it recognizes by storing a pointer to the kdevtmpfs struct
 	// thread in struct inode::i_private. Accessor doesn't yet support deletion
 	// of files at all, and probably won't as long as we don't need to support
 	// kernel modules, so this is moot for now.
-	return a.vfsObj.MknodAt(a.wrapContext(ctx), a.creds, a.pathOperationAt(pathname), &vfs.MknodOptions{
+	return a.vfsObj.MknodAt(actx, a.creds, a.pathOperationAt(pathname), &vfs.MknodOptions{
 		Mode:     mode,
 		DevMajor: major,
 		DevMinor: minor,

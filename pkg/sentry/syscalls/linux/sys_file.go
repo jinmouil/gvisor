@@ -40,7 +40,7 @@ func fileOpAt(t *kernel.Task, dirFD int32, path string, fn func(root *fs.Dirent,
 		// Common case: we are accessing a file in the root.
 		root := t.FSContext().RootDirectory()
 		err := fn(root, root, name, linux.MaxSymlinkTraversals)
-		root.DecRef()
+		root.DecRef(t)
 		return err
 	} else if dir == "." && dirFD == linux.AT_FDCWD {
 		// Common case: we are accessing a file relative to the current
@@ -48,8 +48,8 @@ func fileOpAt(t *kernel.Task, dirFD int32, path string, fn func(root *fs.Dirent,
 		wd := t.FSContext().WorkingDirectory()
 		root := t.FSContext().RootDirectory()
 		err := fn(root, wd, name, linux.MaxSymlinkTraversals)
-		wd.DecRef()
-		root.DecRef()
+		wd.DecRef(t)
+		root.DecRef(t)
 		return err
 	}
 
@@ -97,19 +97,19 @@ func fileOpOn(t *kernel.Task, dirFD int32, path string, resolve bool, fn func(ro
 	} else {
 		d, err = t.MountNamespace().FindLink(t, root, rel, path, &remainingTraversals)
 	}
-	root.DecRef()
+	root.DecRef(t)
 	if wd != nil {
-		wd.DecRef()
+		wd.DecRef(t)
 	}
 	if f != nil {
-		f.DecRef()
+		f.DecRef(t)
 	}
 	if err != nil {
 		return err
 	}
 
 	err = fn(root, d, remainingTraversals)
-	d.DecRef()
+	d.DecRef(t)
 	return err
 }
 
@@ -184,9 +184,9 @@ func openAt(t *kernel.Task, dirFD int32, addr usermem.Addr, flags uint) (fd uint
 
 		file, err := d.Inode.GetFile(t, d, fileFlags)
 		if err != nil {
-			return syserror.ConvertIntr(err, kernel.ERESTARTSYS)
+			return syserror.ConvertIntr(err, syserror.ERESTARTSYS)
 		}
-		defer file.DecRef()
+		defer file.DecRef(t)
 
 		// Success.
 		newFD, err := t.NewFDFrom(0, file, kernel.FDFlags{
@@ -242,7 +242,7 @@ func mknodAt(t *kernel.Task, dirFD int32, addr usermem.Addr, mode linux.FileMode
 			if err != nil {
 				return err
 			}
-			file.DecRef()
+			file.DecRef(t)
 			return nil
 
 		case linux.ModeNamedPipe:
@@ -332,7 +332,7 @@ func createAt(t *kernel.Task, dirFD int32, addr usermem.Addr, flags uint, mode l
 			if err != nil {
 				break
 			}
-			defer found.DecRef()
+			defer found.DecRef(t)
 
 			// We found something (possibly a symlink). If the
 			// O_EXCL flag was passed, then we can immediately
@@ -357,7 +357,7 @@ func createAt(t *kernel.Task, dirFD int32, addr usermem.Addr, flags uint, mode l
 			resolved, err = found.Inode.Getlink(t)
 			if err == nil {
 				// No more resolution necessary.
-				defer resolved.DecRef()
+				defer resolved.DecRef(t)
 				break
 			}
 			if err != fs.ErrResolveViaReadlink {
@@ -384,7 +384,7 @@ func createAt(t *kernel.Task, dirFD int32, addr usermem.Addr, flags uint, mode l
 			if err != nil {
 				break
 			}
-			defer newParent.DecRef()
+			defer newParent.DecRef(t)
 
 			// Repeat the process with the parent and name of the
 			// symlink target.
@@ -414,9 +414,9 @@ func createAt(t *kernel.Task, dirFD int32, addr usermem.Addr, flags uint, mode l
 			// Create a new fs.File.
 			newFile, err = found.Inode.GetFile(t, found, fileFlags)
 			if err != nil {
-				return syserror.ConvertIntr(err, kernel.ERESTARTSYS)
+				return syserror.ConvertIntr(err, syserror.ERESTARTSYS)
 			}
-			defer newFile.DecRef()
+			defer newFile.DecRef(t)
 		case syserror.ENOENT:
 			// File does not exist. Proceed with creation.
 
@@ -432,7 +432,7 @@ func createAt(t *kernel.Task, dirFD int32, addr usermem.Addr, flags uint, mode l
 				// No luck, bail.
 				return err
 			}
-			defer newFile.DecRef()
+			defer newFile.DecRef(t)
 			found = newFile.Dirent
 		default:
 			return err
@@ -596,17 +596,17 @@ func Ioctl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	// Shared flags between file and socket.
 	switch request {
 	case linux.FIONCLEX:
-		t.FDTable().SetFlags(fd, kernel.FDFlags{
+		t.FDTable().SetFlags(t, fd, kernel.FDFlags{
 			CloseOnExec: false,
 		})
 		return 0, nil, nil
 	case linux.FIOCLEX:
-		t.FDTable().SetFlags(fd, kernel.FDFlags{
+		t.FDTable().SetFlags(t, fd, kernel.FDFlags{
 			CloseOnExec: true,
 		})
 		return 0, nil, nil
@@ -671,9 +671,9 @@ func Getcwd(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 	addr := args[0].Pointer()
 	size := args[1].SizeT()
 	cwd := t.FSContext().WorkingDirectory()
-	defer cwd.DecRef()
+	defer cwd.DecRef(t)
 	root := t.FSContext().RootDirectory()
-	defer root.DecRef()
+	defer root.DecRef(t)
 
 	// Get our fullname from the root and preprend unreachable if the root was
 	// unreachable from our current dirent this is the same behavior as on linux.
@@ -722,7 +722,7 @@ func Chroot(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 			return err
 		}
 
-		t.FSContext().SetRootDirectory(d)
+		t.FSContext().SetRootDirectory(t, d)
 		return nil
 	})
 }
@@ -747,7 +747,7 @@ func Chdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 			return err
 		}
 
-		t.FSContext().SetWorkingDirectory(d)
+		t.FSContext().SetWorkingDirectory(t, d)
 		return nil
 	})
 }
@@ -760,7 +760,7 @@ func Fchdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	// Is it a directory?
 	if !fs.IsDir(file.Dirent.Inode.StableAttr) {
@@ -772,7 +772,7 @@ func Fchdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 		return 0, nil, err
 	}
 
-	t.FSContext().SetWorkingDirectory(file.Dirent)
+	t.FSContext().SetWorkingDirectory(t, file.Dirent)
 	return 0, nil, nil
 }
 
@@ -787,11 +787,11 @@ func Close(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	// Note that Remove provides a reference on the file that we may use to
 	// flush. It is still active until we drop the final reference below
 	// (and other reference-holding operations complete).
-	file, _ := t.FDTable().Remove(fd)
+	file, _ := t.FDTable().Remove(t, fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	err := file.Flush(t)
 	return 0, nil, handleIOError(t, false /* partial */, err, syserror.EINTR, "close", file)
@@ -805,7 +805,7 @@ func Dup(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallCo
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	newFD, err := t.NewFDFrom(0, file, kernel.FDFlags{})
 	if err != nil {
@@ -826,7 +826,7 @@ func Dup2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 		if oldFile == nil {
 			return 0, nil, syserror.EBADF
 		}
-		defer oldFile.DecRef()
+		defer oldFile.DecRef(t)
 
 		return uintptr(newfd), nil, nil
 	}
@@ -850,7 +850,7 @@ func Dup3(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 	if oldFile == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer oldFile.DecRef()
+	defer oldFile.DecRef(t)
 
 	err := t.NewFDAt(newfd, oldFile, kernel.FDFlags{CloseOnExec: flags&linux.O_CLOEXEC != 0})
 	if err != nil {
@@ -900,14 +900,20 @@ func fGetOwn(t *kernel.Task, file *fs.File) int32 {
 //
 // If who is positive, it represents a PID. If negative, it represents a PGID.
 // If the PID or PGID is invalid, the owner is silently unset.
-func fSetOwn(t *kernel.Task, file *fs.File, who int32) {
+func fSetOwn(t *kernel.Task, file *fs.File, who int32) error {
 	a := file.Async(fasync.New).(*fasync.FileAsync)
 	if who < 0 {
+		// Check for overflow before flipping the sign.
+		if who-1 > who {
+			return syserror.EINVAL
+		}
 		pg := t.PIDNamespace().ProcessGroupWithID(kernel.ProcessGroupID(-who))
 		a.SetOwnerProcessGroup(t, pg)
+	} else {
+		tg := t.PIDNamespace().ThreadGroupWithID(kernel.ThreadID(who))
+		a.SetOwnerThreadGroup(t, tg)
 	}
-	tg := t.PIDNamespace().ThreadGroupWithID(kernel.ThreadID(who))
-	a.SetOwnerThreadGroup(t, tg)
+	return nil
 }
 
 // Fcntl implements linux syscall fcntl(2).
@@ -919,7 +925,7 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	switch cmd {
 	case linux.F_DUPFD, linux.F_DUPFD_CLOEXEC:
@@ -935,7 +941,7 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		return uintptr(flags.ToLinuxFDFlags()), nil, nil
 	case linux.F_SETFD:
 		flags := args[2].Uint()
-		err := t.FDTable().SetFlags(fd, kernel.FDFlags{
+		err := t.FDTable().SetFlags(t, fd, kernel.FDFlags{
 			CloseOnExec: flags&linux.FD_CLOEXEC != 0,
 		})
 		return 0, nil, err
@@ -1042,8 +1048,7 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	case linux.F_GETOWN:
 		return uintptr(fGetOwn(t, file)), nil, nil
 	case linux.F_SETOWN:
-		fSetOwn(t, file, args[2].Int())
-		return 0, nil, nil
+		return 0, nil, fSetOwn(t, file, args[2].Int())
 	case linux.F_GETOWN_EX:
 		addr := args[2].Pointer()
 		owner := fGetOwnEx(t, file)
@@ -1052,7 +1057,7 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	case linux.F_SETOWN_EX:
 		addr := args[2].Pointer()
 		var owner linux.FOwnerEx
-		n, err := t.CopyIn(addr, &owner)
+		_, err := t.CopyIn(addr, &owner)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -1064,21 +1069,21 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 				return 0, nil, syserror.ESRCH
 			}
 			a.SetOwnerTask(t, task)
-			return uintptr(n), nil, nil
+			return 0, nil, nil
 		case linux.F_OWNER_PID:
 			tg := t.PIDNamespace().ThreadGroupWithID(kernel.ThreadID(owner.PID))
 			if tg == nil {
 				return 0, nil, syserror.ESRCH
 			}
 			a.SetOwnerThreadGroup(t, tg)
-			return uintptr(n), nil, nil
+			return 0, nil, nil
 		case linux.F_OWNER_PGRP:
 			pg := t.PIDNamespace().ProcessGroupWithID(kernel.ProcessGroupID(owner.PID))
 			if pg == nil {
 				return 0, nil, syserror.ESRCH
 			}
 			a.SetOwnerProcessGroup(t, pg)
-			return uintptr(n), nil, nil
+			return 0, nil, nil
 		default:
 			return 0, nil, syserror.EINVAL
 		}
@@ -1127,7 +1132,7 @@ func Fadvise64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	// If the FD refers to a pipe or FIFO, return error.
 	if fs.IsPipe(file.Dirent.Inode.StableAttr) {
@@ -1149,6 +1154,10 @@ func Fadvise64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 	return 0, nil, nil
 }
 
+// LINT.ThenChange(vfs2/fd.go)
+
+// LINT.IfChange
+
 func mkdirAt(t *kernel.Task, dirFD int32, addr usermem.Addr, mode linux.FileMode) error {
 	path, _, err := copyInPath(t, addr, false /* allowEmpty */)
 	if err != nil {
@@ -1166,7 +1175,7 @@ func mkdirAt(t *kernel.Task, dirFD int32, addr usermem.Addr, mode linux.FileMode
 		switch err {
 		case nil:
 			// The directory existed.
-			defer f.DecRef()
+			defer f.DecRef(t)
 			return syserror.EEXIST
 		case syserror.EACCES:
 			// Permission denied while walking to the directory.
@@ -1344,7 +1353,7 @@ func linkAt(t *kernel.Task, oldDirFD int32, oldAddr usermem.Addr, newDirFD int32
 		if target == nil {
 			return syserror.EBADF
 		}
-		defer target.DecRef()
+		defer target.DecRef(t)
 		if err := mayLinkAt(t, target.Dirent.Inode); err != nil {
 			return err
 		}
@@ -1597,7 +1606,7 @@ func Ftruncate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	// Reject truncation if the file flags do not permit this operation.
 	// This is different from truncate(2) above.
@@ -1725,7 +1734,7 @@ func chownAt(t *kernel.Task, fd int32, addr usermem.Addr, resolve, allowEmpty bo
 		if file == nil {
 			return syserror.EBADF
 		}
-		defer file.DecRef()
+		defer file.DecRef(t)
 
 		return chown(t, file.Dirent, uid, gid)
 	}
@@ -1763,7 +1772,7 @@ func Fchown(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	return 0, nil, chown(t, file.Dirent, uid, gid)
 }
@@ -1828,7 +1837,7 @@ func Fchmod(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	return 0, nil, chmod(t, file.Dirent, mode)
 }
@@ -1888,10 +1897,10 @@ func utimes(t *kernel.Task, dirFD int32, addr usermem.Addr, ts fs.TimeSpec, reso
 		if f == nil {
 			return syserror.EBADF
 		}
-		defer f.DecRef()
+		defer f.DecRef(t)
 
 		root := t.FSContext().RootDirectory()
-		defer root.DecRef()
+		defer root.DecRef(t)
 
 		return setTimestamp(root, f.Dirent, linux.MaxSymlinkTraversals)
 	}
@@ -2083,7 +2092,7 @@ func Fallocate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	if offset < 0 || length <= 0 {
 		return 0, nil, syserror.EINVAL
@@ -2136,7 +2145,7 @@ func Flock(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		// flock(2): EBADF fd is not an open file descriptor.
 		return 0, nil, syserror.EBADF
 	}
-	defer file.DecRef()
+	defer file.DecRef(t)
 
 	nonblocking := operation&linux.LOCK_NB != 0
 	operation &^= linux.LOCK_NB
@@ -2219,8 +2228,8 @@ func MemfdCreate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.S
 		return 0, nil, err
 	}
 
-	defer dirent.DecRef()
-	defer file.DecRef()
+	defer dirent.DecRef(t)
+	defer file.DecRef(t)
 
 	newFD, err := t.NewFDFrom(0, file, kernel.FDFlags{
 		CloseOnExec: cloExec,

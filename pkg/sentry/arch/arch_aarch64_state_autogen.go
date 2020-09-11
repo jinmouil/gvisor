@@ -3,3 +3,70 @@
 // +build arm64
 
 package arch
+
+import (
+	"gvisor.dev/gvisor/pkg/state"
+)
+
+func (x *Registers) StateTypeName() string {
+	return "pkg/sentry/arch.Registers"
+}
+
+func (x *Registers) StateFields() []string {
+	return []string{
+		"PtraceRegs",
+		"TPIDR_EL0",
+	}
+}
+
+func (x *Registers) beforeSave() {}
+
+func (x *Registers) StateSave(m state.Sink) {
+	x.beforeSave()
+	m.Save(0, &x.PtraceRegs)
+	m.Save(1, &x.TPIDR_EL0)
+}
+
+func (x *Registers) afterLoad() {}
+
+func (x *Registers) StateLoad(m state.Source) {
+	m.Load(0, &x.PtraceRegs)
+	m.Load(1, &x.TPIDR_EL0)
+}
+
+func (x *State) StateTypeName() string {
+	return "pkg/sentry/arch.State"
+}
+
+func (x *State) StateFields() []string {
+	return []string{
+		"Regs",
+		"aarch64FPState",
+		"FeatureSet",
+		"OrigR0",
+	}
+}
+
+func (x *State) beforeSave() {}
+
+func (x *State) StateSave(m state.Sink) {
+	x.beforeSave()
+	m.Save(0, &x.Regs)
+	m.Save(1, &x.aarch64FPState)
+	m.Save(2, &x.FeatureSet)
+	m.Save(3, &x.OrigR0)
+}
+
+func (x *State) afterLoad() {}
+
+func (x *State) StateLoad(m state.Source) {
+	m.Load(0, &x.Regs)
+	m.LoadWait(1, &x.aarch64FPState)
+	m.Load(2, &x.FeatureSet)
+	m.Load(3, &x.OrigR0)
+}
+
+func init() {
+	state.Register((*Registers)(nil))
+	state.Register((*State)(nil))
+}

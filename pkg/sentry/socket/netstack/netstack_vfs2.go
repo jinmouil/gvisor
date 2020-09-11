@@ -21,16 +21,16 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	fslock "gvisor.dev/gvisor/pkg/sentry/fs/lock"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/sockfs"
-	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/socket"
-	"gvisor.dev/gvisor/pkg/sentry/socket/netfilter"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/syserr"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"gvisor.dev/gvisor/tools/go_marshal/marshal"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 // SocketVFS2 encapsulates all the state needed to represent a network stack
@@ -56,6 +56,7 @@ func NewVFS2(t *kernel.Task, family int, skType linux.SockType, protocol int, qu
 
 	mnt := t.Kernel().SocketMount()
 	d := sockfs.NewDentry(t.Credentials(), mnt)
+	defer d.DecRef(t)
 
 	s := &SocketVFS2{
 		socketOpsCommon: socketOpsCommon{
@@ -150,14 +151,18 @@ func (s *SocketVFS2) Write(ctx context.Context, src usermem.IOSequence, opts vfs
 // tcpip.Endpoint.
 func (s *SocketVFS2) Accept(t *kernel.Task, peerRequested bool, flags int, blocking bool) (int32, linux.SockAddr, uint32, *syserr.Error) {
 	// Issue the accept request to get the new endpoint.
-	ep, wq, terr := s.Endpoint.Accept()
+	var peerAddr *tcpip.FullAddress
+	if peerRequested {
+		peerAddr = &tcpip.FullAddress{}
+	}
+	ep, wq, terr := s.Endpoint.Accept(peerAddr)
 	if terr != nil {
 		if terr != tcpip.ErrWouldBlock || !blocking {
 			return 0, nil, 0, syserr.TranslateNetstackError(terr)
 		}
 
 		var err *syserr.Error
-		ep, wq, err = s.blockingAccept(t)
+		ep, wq, err = s.blockingAccept(t, peerAddr)
 		if err != nil {
 			return 0, nil, 0, err
 		}
@@ -167,7 +172,7 @@ func (s *SocketVFS2) Accept(t *kernel.Task, peerRequested bool, flags int, block
 	if err != nil {
 		return 0, nil, 0, err
 	}
-	defer ns.DecRef()
+	defer ns.DecRef(t)
 
 	if err := ns.SetStatusFlags(t, t.Credentials(), uint32(flags&linux.SOCK_NONBLOCK)); err != nil {
 		return 0, nil, 0, syserr.FromError(err)
@@ -175,13 +180,9 @@ func (s *SocketVFS2) Accept(t *kernel.Task, peerRequested bool, flags int, block
 
 	var addr linux.SockAddr
 	var addrLen uint32
-	if peerRequested {
+	if peerAddr != nil {
 		// Get address of the peer and write it to peer slice.
-		var err *syserr.Error
-		addr, addrLen, err = ns.Impl().(*SocketVFS2).GetPeerName(t)
-		if err != nil {
-			return 0, nil, 0, err
-		}
+		addr, addrLen = ConvertAddress(s.family, *peerAddr)
 	}
 
 	fd, e := t.NewFDFromVFS2(0, ns, kernel.FDFlags{
@@ -200,7 +201,7 @@ func (s *SocketVFS2) Ioctl(ctx context.Context, uio usermem.IO, args arch.Syscal
 
 // GetSockOpt implements the linux syscall getsockopt(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (interface{}, *syserr.Error) {
+func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (marshal.Marshallable, *syserr.Error) {
 	// TODO(b/78348848): Unlike other socket options, SO_TIMESTAMP is
 	// implemented specifically for netstack.SocketVFS2 rather than
 	// commonEndpoint. commonEndpoint should be extended to support socket
@@ -210,63 +211,28 @@ func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.
 		if outLen < sizeOfInt32 {
 			return nil, syserr.ErrInvalidArgument
 		}
-		val := int32(0)
+		val := primitive.Int32(0)
 		s.readMu.Lock()
 		defer s.readMu.Unlock()
 		if s.sockOptTimestamp {
 			val = 1
 		}
-		return val, nil
+		return &val, nil
 	}
 	if level == linux.SOL_TCP && name == linux.TCP_INQ {
 		if outLen < sizeOfInt32 {
 			return nil, syserr.ErrInvalidArgument
 		}
-		val := int32(0)
+		val := primitive.Int32(0)
 		s.readMu.Lock()
 		defer s.readMu.Unlock()
 		if s.sockOptInq {
 			val = 1
 		}
-		return val, nil
+		return &val, nil
 	}
 
-	if s.skType == linux.SOCK_RAW && level == linux.IPPROTO_IP {
-		switch name {
-		case linux.IPT_SO_GET_INFO:
-			if outLen < linux.SizeOfIPTGetinfo {
-				return nil, syserr.ErrInvalidArgument
-			}
-
-			stack := inet.StackFromContext(t)
-			if stack == nil {
-				return nil, syserr.ErrNoDevice
-			}
-			info, err := netfilter.GetInfo(t, stack.(*Stack).Stack, outPtr)
-			if err != nil {
-				return nil, err
-			}
-			return info, nil
-
-		case linux.IPT_SO_GET_ENTRIES:
-			if outLen < linux.SizeOfIPTGetEntries {
-				return nil, syserr.ErrInvalidArgument
-			}
-
-			stack := inet.StackFromContext(t)
-			if stack == nil {
-				return nil, syserr.ErrNoDevice
-			}
-			entries, err := netfilter.GetEntries(t, stack.(*Stack).Stack, outPtr, outLen)
-			if err != nil {
-				return nil, err
-			}
-			return entries, nil
-
-		}
-	}
-
-	return GetSockOpt(t, s, s.Endpoint, s.family, s.skType, level, name, outLen)
+	return GetSockOpt(t, s, s.Endpoint, s.family, s.skType, level, name, outPtr, outLen)
 }
 
 // SetSockOpt implements the linux syscall setsockopt(2) for sockets backed by
@@ -294,26 +260,6 @@ func (s *SocketVFS2) SetSockOpt(t *kernel.Task, level int, name int, optVal []by
 		defer s.readMu.Unlock()
 		s.sockOptInq = usermem.ByteOrder.Uint32(optVal) != 0
 		return nil
-	}
-
-	if s.skType == linux.SOCK_RAW && level == linux.IPPROTO_IP {
-		switch name {
-		case linux.IPT_SO_SET_REPLACE:
-			if len(optVal) < linux.SizeOfIPTReplace {
-				return syserr.ErrInvalidArgument
-			}
-
-			stack := inet.StackFromContext(t)
-			if stack == nil {
-				return syserr.ErrNoDevice
-			}
-			// Stack must be a netstack stack.
-			return netfilter.SetEntries(stack.(*Stack).Stack, optVal)
-
-		case linux.IPT_SO_SET_ADD_COUNTERS:
-			// TODO(gvisor.dev/issue/170): Counter support.
-			return nil
-		}
 	}
 
 	return SetSockOpt(t, s, s.Endpoint, level, name, optVal)

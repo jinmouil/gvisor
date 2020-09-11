@@ -93,9 +93,9 @@ type epollInterest struct {
 
 // NewEpollInstanceFD returns a FileDescription representing a new epoll
 // instance. A reference is taken on the returned FileDescription.
-func (vfs *VirtualFilesystem) NewEpollInstanceFD() (*FileDescription, error) {
+func (vfs *VirtualFilesystem) NewEpollInstanceFD(ctx context.Context) (*FileDescription, error) {
 	vd := vfs.NewAnonVirtualDentry("[eventpoll]")
-	defer vd.DecRef()
+	defer vd.DecRef(ctx)
 	ep := &EpollInstance{
 		interest: make(map[epollInterestKey]*epollInterest),
 	}
@@ -110,7 +110,7 @@ func (vfs *VirtualFilesystem) NewEpollInstanceFD() (*FileDescription, error) {
 }
 
 // Release implements FileDescriptionImpl.Release.
-func (ep *EpollInstance) Release() {
+func (ep *EpollInstance) Release(ctx context.Context) {
 	// Unregister all polled fds.
 	ep.interestMu.Lock()
 	defer ep.interestMu.Unlock()
@@ -186,7 +186,7 @@ func (ep *EpollInstance) AddInterest(file *FileDescription, num int32, event lin
 	}
 
 	// Register interest in file.
-	mask := event.Events | linux.EPOLLERR | linux.EPOLLRDHUP
+	mask := event.Events | linux.EPOLLERR | linux.EPOLLHUP
 	epi := &epollInterest{
 		epoll:    ep,
 		key:      key,
@@ -257,7 +257,7 @@ func (ep *EpollInstance) ModifyInterest(file *FileDescription, num int32, event 
 	}
 
 	// Update epi for the next call to ep.ReadEvents().
-	mask := event.Events | linux.EPOLLERR | linux.EPOLLRDHUP
+	mask := event.Events | linux.EPOLLERR | linux.EPOLLHUP
 	ep.mu.Lock()
 	epi.mask = mask
 	epi.userData = event.Data

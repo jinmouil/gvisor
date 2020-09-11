@@ -343,7 +343,11 @@ func (e *endpoint) Peek([][]byte) (int64, tcpip.ControlMessages, *tcpip.Error) {
 }
 
 // SetSockOpt sets a socket option.
-func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
+func (e *endpoint) SetSockOpt(opt tcpip.SettableSocketOption) *tcpip.Error {
+	switch opt.(type) {
+	case *tcpip.SocketDetachFilterOption:
+		return nil
+	}
 	return nil
 }
 
@@ -411,14 +415,8 @@ func (e *endpoint) GetSockOptInt(opt tcpip.SockOptInt) (int, *tcpip.Error) {
 }
 
 // GetSockOpt implements tcpip.Endpoint.GetSockOpt.
-func (e *endpoint) GetSockOpt(opt interface{}) *tcpip.Error {
-	switch opt.(type) {
-	case tcpip.ErrorOption:
-		return nil
-
-	default:
-		return tcpip.ErrUnknownProtocolOption
-	}
+func (*endpoint) GetSockOpt(tcpip.GettableSocketOption) *tcpip.Error {
+	return tcpip.ErrUnknownProtocolOption
 }
 
 func send4(r *stack.Route, ident uint16, data buffer.View, ttl uint8, owner tcpip.PacketOwner) *tcpip.Error {
@@ -426,9 +424,12 @@ func send4(r *stack.Route, ident uint16, data buffer.View, ttl uint8, owner tcpi
 		return tcpip.ErrInvalidEndpointState
 	}
 
-	hdr := buffer.NewPrependable(header.ICMPv4MinimumSize + int(r.MaxHeaderLength()))
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: header.ICMPv4MinimumSize + int(r.MaxHeaderLength()),
+	})
+	pkt.Owner = owner
 
-	icmpv4 := header.ICMPv4(hdr.Prepend(header.ICMPv4MinimumSize))
+	icmpv4 := header.ICMPv4(pkt.TransportHeader().Push(header.ICMPv4MinimumSize))
 	copy(icmpv4, data)
 	// Set the ident to the user-specified port. Sequence number should
 	// already be set by the user.
@@ -443,15 +444,12 @@ func send4(r *stack.Route, ident uint16, data buffer.View, ttl uint8, owner tcpi
 	icmpv4.SetChecksum(0)
 	icmpv4.SetChecksum(^header.Checksum(icmpv4, header.Checksum(data, 0)))
 
+	pkt.Data = data.ToVectorisedView()
+
 	if ttl == 0 {
 		ttl = r.DefaultTTL()
 	}
-	return r.WritePacket(nil /* gso */, stack.NetworkHeaderParams{Protocol: header.ICMPv4ProtocolNumber, TTL: ttl, TOS: stack.DefaultTOS}, &stack.PacketBuffer{
-		Header:          hdr,
-		Data:            data.ToVectorisedView(),
-		TransportHeader: buffer.View(icmpv4),
-		Owner:           owner,
-	})
+	return r.WritePacket(nil /* gso */, stack.NetworkHeaderParams{Protocol: header.ICMPv4ProtocolNumber, TTL: ttl, TOS: stack.DefaultTOS}, pkt)
 }
 
 func send6(r *stack.Route, ident uint16, data buffer.View, ttl uint8) *tcpip.Error {
@@ -459,9 +457,11 @@ func send6(r *stack.Route, ident uint16, data buffer.View, ttl uint8) *tcpip.Err
 		return tcpip.ErrInvalidEndpointState
 	}
 
-	hdr := buffer.NewPrependable(header.ICMPv6MinimumSize + int(r.MaxHeaderLength()))
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: header.ICMPv6MinimumSize + int(r.MaxHeaderLength()),
+	})
 
-	icmpv6 := header.ICMPv6(hdr.Prepend(header.ICMPv6MinimumSize))
+	icmpv6 := header.ICMPv6(pkt.TransportHeader().Push(header.ICMPv6MinimumSize))
 	copy(icmpv6, data)
 	// Set the ident. Sequence number is provided by the user.
 	icmpv6.SetIdent(ident)
@@ -473,15 +473,12 @@ func send6(r *stack.Route, ident uint16, data buffer.View, ttl uint8) *tcpip.Err
 
 	dataVV := data.ToVectorisedView()
 	icmpv6.SetChecksum(header.ICMPv6Checksum(icmpv6, r.LocalAddress, r.RemoteAddress, dataVV))
+	pkt.Data = dataVV
 
 	if ttl == 0 {
 		ttl = r.DefaultTTL()
 	}
-	return r.WritePacket(nil /* gso */, stack.NetworkHeaderParams{Protocol: header.ICMPv6ProtocolNumber, TTL: ttl, TOS: stack.DefaultTOS}, &stack.PacketBuffer{
-		Header:          hdr,
-		Data:            dataVV,
-		TransportHeader: buffer.View(icmpv6),
-	})
+	return r.WritePacket(nil /* gso */, stack.NetworkHeaderParams{Protocol: header.ICMPv6ProtocolNumber, TTL: ttl, TOS: stack.DefaultTOS}, pkt)
 }
 
 // checkV4MappedLocked determines the effective network protocol and converts
@@ -600,7 +597,7 @@ func (*endpoint) Listen(int) *tcpip.Error {
 }
 
 // Accept is not supported by UDP, it just fails.
-func (*endpoint) Accept() (tcpip.Endpoint, *waiter.Queue, *tcpip.Error) {
+func (*endpoint) Accept(*tcpip.FullAddress) (tcpip.Endpoint, *waiter.Queue, *tcpip.Error) {
 	return nil, nil, tcpip.ErrNotSupported
 }
 
@@ -744,15 +741,19 @@ func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, pk
 	// Only accept echo replies.
 	switch e.NetProto {
 	case header.IPv4ProtocolNumber:
-		h, ok := pkt.Data.PullUp(header.ICMPv4MinimumSize)
-		if !ok || header.ICMPv4(h).Type() != header.ICMPv4EchoReply {
+		h := header.ICMPv4(pkt.TransportHeader().View())
+		// TODO(b/129292233): Determine if len(h) check is still needed after early
+		// parsing.
+		if len(h) < header.ICMPv4MinimumSize || h.Type() != header.ICMPv4EchoReply {
 			e.stack.Stats().DroppedPackets.Increment()
 			e.stats.ReceiveErrors.MalformedPacketsReceived.Increment()
 			return
 		}
 	case header.IPv6ProtocolNumber:
-		h, ok := pkt.Data.PullUp(header.ICMPv6MinimumSize)
-		if !ok || header.ICMPv6(h).Type() != header.ICMPv6EchoReply {
+		h := header.ICMPv6(pkt.TransportHeader().View())
+		// TODO(b/129292233): Determine if len(h) check is still needed after early
+		// parsing.
+		if len(h) < header.ICMPv6MinimumSize || h.Type() != header.ICMPv6EchoReply {
 			e.stack.Stats().DroppedPackets.Increment()
 			e.stats.ReceiveErrors.MalformedPacketsReceived.Increment()
 			return
@@ -786,12 +787,14 @@ func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, pk
 		},
 	}
 
-	packet.data = pkt.Data
+	// ICMP socket's data includes ICMP header.
+	packet.data = pkt.TransportHeader().View().ToVectorisedView()
+	packet.data.Append(pkt.Data)
 
 	e.rcvList.PushBack(packet)
 	e.rcvBufSize += packet.data.Size()
 
-	packet.timestamp = e.stack.NowNanoseconds()
+	packet.timestamp = e.stack.Clock().NowNanoseconds()
 
 	e.rcvMu.Unlock()
 	e.stats.PacketsReceived.Increment()
@@ -827,3 +830,8 @@ func (e *endpoint) Stats() tcpip.EndpointStats {
 
 // Wait implements stack.TransportEndpoint.Wait.
 func (*endpoint) Wait() {}
+
+// LastError implements tcpip.Endpoint.LastError.
+func (*endpoint) LastError() *tcpip.Error {
+	return nil
+}

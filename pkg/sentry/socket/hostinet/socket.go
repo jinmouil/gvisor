@@ -36,6 +36,8 @@ import (
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"gvisor.dev/gvisor/tools/go_marshal/marshal"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 const (
@@ -98,12 +100,12 @@ func newSocketFile(ctx context.Context, family int, stype linux.SockType, protoc
 		return nil, syserr.FromError(err)
 	}
 	dirent := socket.NewDirent(ctx, socketDevice)
-	defer dirent.DecRef()
+	defer dirent.DecRef(ctx)
 	return fs.NewFile(ctx, dirent, fs.FileFlags{NonBlocking: nonblock, Read: true, Write: true, NonSeekable: true}, s), nil
 }
 
 // Release implements fs.FileOperations.Release.
-func (s *socketOpsCommon) Release() {
+func (s *socketOpsCommon) Release(context.Context) {
 	fdnotifier.RemoveFD(int32(s.fd))
 	syscall.Close(s.fd)
 }
@@ -267,7 +269,7 @@ func (s *socketOpsCommon) Accept(t *kernel.Task, peerRequested bool, flags int, 
 			syscall.Close(fd)
 			return 0, nil, 0, err
 		}
-		defer f.DecRef()
+		defer f.DecRef(t)
 
 		kfd, kerr = t.NewFDFromVFS2(0, f, kernel.FDFlags{
 			CloseOnExec: flags&syscall.SOCK_CLOEXEC != 0,
@@ -279,7 +281,7 @@ func (s *socketOpsCommon) Accept(t *kernel.Task, peerRequested bool, flags int, 
 			syscall.Close(fd)
 			return 0, nil, 0, err
 		}
-		defer f.DecRef()
+		defer f.DecRef(t)
 
 		kfd, kerr = t.NewFDFrom(0, f, kernel.FDFlags{
 			CloseOnExec: flags&syscall.SOCK_CLOEXEC != 0,
@@ -319,7 +321,7 @@ func (s *socketOpsCommon) Shutdown(t *kernel.Task, how int) *syserr.Error {
 }
 
 // GetSockOpt implements socket.Socket.GetSockOpt.
-func (s *socketOpsCommon) GetSockOpt(t *kernel.Task, level int, name int, outPtr usermem.Addr, outLen int) (interface{}, *syserr.Error) {
+func (s *socketOpsCommon) GetSockOpt(t *kernel.Task, level int, name int, outPtr usermem.Addr, outLen int) (marshal.Marshallable, *syserr.Error) {
 	if outLen < 0 {
 		return nil, syserr.ErrInvalidArgument
 	}
@@ -364,7 +366,8 @@ func (s *socketOpsCommon) GetSockOpt(t *kernel.Task, level int, name int, outPtr
 	if err != nil {
 		return nil, syserr.FromError(err)
 	}
-	return opt, nil
+	optP := primitive.ByteSlice(opt)
+	return &optP, nil
 }
 
 // SetSockOpt implements socket.Socket.SetSockOpt.
@@ -708,6 +711,6 @@ func (p *socketProvider) Pair(t *kernel.Task, stype linux.SockType, protocol int
 func init() {
 	for _, family := range []int{syscall.AF_INET, syscall.AF_INET6} {
 		socket.RegisterProvider(family, &socketProvider{family})
-		socket.RegisterProviderVFS2(family, &socketProviderVFS2{})
+		socket.RegisterProviderVFS2(family, &socketProviderVFS2{family})
 	}
 }

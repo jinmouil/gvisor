@@ -490,6 +490,9 @@ func (h *handshake) resolveRoute() *tcpip.Error {
 				<-h.ep.undrain
 				h.ep.mu.Lock()
 			}
+			if n&notifyError != 0 {
+				return h.ep.LastError()
+			}
 		}
 
 		// Wait for notification.
@@ -509,9 +512,7 @@ func (h *handshake) execute() *tcpip.Error {
 	// Initialize the resend timer.
 	resendWaker := sleep.Waker{}
 	timeOut := time.Duration(time.Second)
-	rt := time.AfterFunc(timeOut, func() {
-		resendWaker.Assert()
-	})
+	rt := time.AfterFunc(timeOut, resendWaker.Assert)
 	defer rt.Stop()
 
 	// Set up the wakers.
@@ -521,7 +522,7 @@ func (h *handshake) execute() *tcpip.Error {
 	s.AddWaker(&h.ep.newSegmentWaker, wakerForNewSegment)
 	defer s.Done()
 
-	var sackEnabled tcpip.StackSACKEnabled
+	var sackEnabled tcpip.TCPSACKEnabled
 	if err := h.ep.stack.TransportProtocolOption(ProtocolNumber, &sackEnabled); err != nil {
 		// If stack returned an error when checking for SACKEnabled
 		// status then just default to switching off SACK negotiation.
@@ -617,6 +618,9 @@ func (h *handshake) execute() *tcpip.Error {
 				h.ep.mu.Unlock()
 				<-h.ep.undrain
 				h.ep.mu.Lock()
+			}
+			if n&notifyError != 0 {
+				return h.ep.LastError()
 			}
 
 		case wakerForNewSegment:
@@ -742,11 +746,7 @@ func (e *endpoint) sendTCP(r *stack.Route, tf tcpFields, data buffer.VectorisedV
 
 func buildTCPHdr(r *stack.Route, tf tcpFields, pkt *stack.PacketBuffer, gso *stack.GSO) {
 	optLen := len(tf.opts)
-	hdr := &pkt.Header
-	packetSize := pkt.Data.Size()
-	// Initialize the header.
-	tcp := header.TCP(hdr.Prepend(header.TCPMinimumSize + optLen))
-	pkt.TransportHeader = buffer.View(tcp)
+	tcp := header.TCP(pkt.TransportHeader().Push(header.TCPMinimumSize + optLen))
 	tcp.Encode(&header.TCPFields{
 		SrcPort:    tf.id.LocalPort,
 		DstPort:    tf.id.RemotePort,
@@ -758,8 +758,7 @@ func buildTCPHdr(r *stack.Route, tf tcpFields, pkt *stack.PacketBuffer, gso *sta
 	})
 	copy(tcp[header.TCPMinimumSize:], tf.opts)
 
-	length := uint16(hdr.UsedLength() + packetSize)
-	xsum := r.PseudoHeaderChecksum(ProtocolNumber, length)
+	xsum := r.PseudoHeaderChecksum(ProtocolNumber, uint16(pkt.Size()))
 	// Only calculate the checksum if offloading isn't supported.
 	if gso != nil && gso.NeedsCsum {
 		// This is called CHECKSUM_PARTIAL in the Linux kernel. We
@@ -797,17 +796,18 @@ func sendTCPBatch(r *stack.Route, tf tcpFields, data buffer.VectorisedView, gso 
 			packetSize = size
 		}
 		size -= packetSize
-		var pkt stack.PacketBuffer
-		pkt.Header = buffer.NewPrependable(hdrSize)
+		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+			ReserveHeaderBytes: hdrSize,
+		})
 		pkt.Hash = tf.txHash
 		pkt.Owner = owner
 		pkt.EgressRoute = r
 		pkt.GSOOptions = gso
 		pkt.NetworkProtocolNumber = r.NetworkProtocolNumber()
 		data.ReadToVV(&pkt.Data, packetSize)
-		buildTCPHdr(r, tf, &pkt, gso)
+		buildTCPHdr(r, tf, pkt, gso)
 		tf.seq = tf.seq.Add(seqnum.Size(packetSize))
-		pkts.PushBack(&pkt)
+		pkts.PushBack(pkt)
 	}
 
 	if tf.ttl == 0 {
@@ -833,12 +833,12 @@ func sendTCP(r *stack.Route, tf tcpFields, data buffer.VectorisedView, gso *stac
 		return sendTCPBatch(r, tf, data, gso, owner)
 	}
 
-	pkt := &stack.PacketBuffer{
-		Header: buffer.NewPrependable(header.TCPMinimumSize + int(r.MaxHeaderLength()) + optLen),
-		Data:   data,
-		Hash:   tf.txHash,
-		Owner:  owner,
-	}
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: header.TCPMinimumSize + int(r.MaxHeaderLength()) + optLen,
+		Data:               data,
+	})
+	pkt.Hash = tf.txHash
+	pkt.Owner = owner
 	buildTCPHdr(r, tf, pkt, gso)
 
 	if tf.ttl == 0 {
@@ -1020,14 +1020,19 @@ func (e *endpoint) transitionToStateEstablishedLocked(h *handshake) {
 // delivered to this endpoint from the demuxer when the endpoint
 // is transitioned to StateClose.
 func (e *endpoint) transitionToStateCloseLocked() {
-	if e.EndpointState() == StateClose {
+	s := e.EndpointState()
+	if s == StateClose {
 		return
 	}
+
+	if s.connected() {
+		e.stack.Stats().TCP.CurrentConnected.Decrement()
+		e.stack.Stats().TCP.EstablishedClosed.Increment()
+	}
+
 	// Mark the endpoint as fully closed for reads/writes.
 	e.cleanupLocked()
 	e.setEndpointState(StateClose)
-	e.stack.Stats().TCP.CurrentConnected.Decrement()
-	e.stack.Stats().TCP.EstablishedClosed.Increment()
 }
 
 // tryDeliverSegmentFromClosedEndpoint attempts to deliver the parsed
@@ -1050,8 +1055,8 @@ func (e *endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
 		panic("current endpoint not removed from demuxer, enqueing segments to itself")
 	}
 
-	if ep.(*endpoint).enqueueSegment(s) {
-		ep.(*endpoint).newSegmentWaker.Assert()
+	if ep := ep.(*endpoint); ep.enqueueSegment(s) {
+		ep.newSegmentWaker.Assert()
 	}
 }
 
@@ -1120,7 +1125,7 @@ func (e *endpoint) handleReset(s *segment) (ok bool, err *tcpip.Error) {
 func (e *endpoint) handleSegments(fastPath bool) *tcpip.Error {
 	checkRequeue := true
 	for i := 0; i < maxSegmentsPerWake; i++ {
-		if e.EndpointState() == StateClose || e.EndpointState() == StateError {
+		if e.EndpointState().closed() {
 			return nil
 		}
 		s := e.segmentQueue.dequeue()
@@ -1157,13 +1162,18 @@ func (e *endpoint) handleSegments(fastPath bool) *tcpip.Error {
 	return nil
 }
 
-// handleSegment handles a given segment and notifies the worker goroutine if
-// if the connection should be terminated.
-func (e *endpoint) handleSegment(s *segment) (cont bool, err *tcpip.Error) {
-	// Invoke the tcp probe if installed.
+func (e *endpoint) probeSegment() {
 	if e.probe != nil {
 		e.probe(e.completeState())
 	}
+}
+
+// handleSegment handles a given segment and notifies the worker goroutine if
+// if the connection should be terminated.
+func (e *endpoint) handleSegment(s *segment) (cont bool, err *tcpip.Error) {
+	// Invoke the tcp probe if installed. The tcp probe function will update
+	// the TCPEndpointState after the segment is processed.
+	defer e.probeSegment()
 
 	if s.flagIsSet(header.TCPFlagRst) {
 		if ok, err := e.handleReset(s); !ok {
@@ -1440,9 +1450,7 @@ func (e *endpoint) protocolMainLoop(handshake bool, wakerInitDone chan<- struct{
 					if e.EndpointState() == StateFinWait2 && e.closed {
 						// The socket has been closed and we are in FIN_WAIT2
 						// so start the FIN_WAIT2 timer.
-						closeTimer = time.AfterFunc(e.tcpLingerTimeout, func() {
-							closeWaker.Assert()
-						})
+						closeTimer = time.AfterFunc(e.tcpLingerTimeout, closeWaker.Assert)
 						e.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.EventIn | waiter.EventOut)
 					}
 				}
@@ -1460,7 +1468,7 @@ func (e *endpoint) protocolMainLoop(handshake bool, wakerInitDone chan<- struct{
 							return err
 						}
 					}
-					if e.EndpointState() != StateClose && e.EndpointState() != StateError {
+					if !e.EndpointState().closed() {
 						// Only block the worker if the endpoint
 						// is not in closed state or error state.
 						close(e.drainDone)
@@ -1526,7 +1534,12 @@ func (e *endpoint) protocolMainLoop(handshake bool, wakerInitDone chan<- struct{
 	}
 
 loop:
-	for e.EndpointState() != StateTimeWait && e.EndpointState() != StateClose && e.EndpointState() != StateError {
+	for {
+		switch e.EndpointState() {
+		case StateTimeWait, StateClose, StateError:
+			break loop
+		}
+
 		e.mu.Unlock()
 		v, _ := s.Fetch(true)
 		e.mu.Lock()
@@ -1689,7 +1702,7 @@ func (e *endpoint) doTimeWait() (twReuse func()) {
 			}
 		case notification:
 			n := e.fetchNotifications()
-			if n&notifyClose != 0 || n&notifyAbort != 0 {
+			if n&notifyAbort != 0 {
 				return nil
 			}
 			if n&notifyDrain != 0 {

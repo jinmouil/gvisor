@@ -77,8 +77,7 @@ func Mount(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 
 	// Silently allow MS_NOSUID, since we don't implement set-id bits
 	// anyway.
-	const unsupportedFlags = linux.MS_NODEV |
-		linux.MS_NODIRATIME | linux.MS_STRICTATIME
+	const unsupportedFlags = linux.MS_NODIRATIME | linux.MS_STRICTATIME
 
 	// Linux just allows passing any flags to mount(2) - it won't fail when
 	// unknown or unsupported flags are passed. Since we don't implement
@@ -94,6 +93,12 @@ func Mount(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	if flags&linux.MS_NOEXEC == linux.MS_NOEXEC {
 		opts.Flags.NoExec = true
 	}
+	if flags&linux.MS_NODEV == linux.MS_NODEV {
+		opts.Flags.NoDev = true
+	}
+	if flags&linux.MS_NOSUID == linux.MS_NOSUID {
+		opts.Flags.NoSUID = true
+	}
 	if flags&linux.MS_RDONLY == linux.MS_RDONLY {
 		opts.ReadOnly = true
 	}
@@ -103,9 +108,9 @@ func Mount(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	if err != nil {
 		return 0, nil, err
 	}
-	defer target.Release()
-
-	return 0, nil, t.Kernel().VFS().MountAt(t, creds, source, &target.pop, fsType, &opts)
+	defer target.Release(t)
+	_, err = t.Kernel().VFS().MountAt(t, creds, source, &target.pop, fsType, &opts)
+	return 0, nil, err
 }
 
 // Umount2 implements Linux syscall umount2(2).
@@ -135,7 +140,7 @@ func Umount2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	if err != nil {
 		return 0, nil, err
 	}
-	defer tpop.Release()
+	defer tpop.Release(t)
 
 	opts := vfs.UmountOptions{
 		Flags: uint32(flags),

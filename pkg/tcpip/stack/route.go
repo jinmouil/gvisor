@@ -48,6 +48,10 @@ type Route struct {
 
 	// Loop controls where WritePacket should send packets.
 	Loop PacketLooping
+
+	// directedBroadcast indicates whether this route is sending a directed
+	// broadcast packet.
+	directedBroadcast bool
 }
 
 // makeRoute initializes a new route. It takes ownership of the provided
@@ -106,6 +110,12 @@ func (r *Route) GSOMaxSize() uint32 {
 	return 0
 }
 
+// ResolveWith immediately resolves a route with the specified remote link
+// address.
+func (r *Route) ResolveWith(addr tcpip.LinkAddress) {
+	r.RemoteLinkAddress = addr
+}
+
 // Resolve attempts to resolve the link address if necessary. Returns ErrWouldBlock in
 // case address resolution requires blocking, e.g. wait for ARP reply. Waker is
 // notified when address resolution is complete (success or not).
@@ -131,6 +141,16 @@ func (r *Route) Resolve(waker *sleep.Waker) (<-chan struct{}, *tcpip.Error) {
 		}
 		nextAddr = r.RemoteAddress
 	}
+
+	if r.ref.nic.neigh != nil {
+		entry, ch, err := r.ref.nic.neigh.entry(nextAddr, r.LocalAddress, r.ref.linkRes, waker)
+		if err != nil {
+			return ch, err
+		}
+		r.RemoteLinkAddress = entry.LinkAddr
+		return nil, nil
+	}
+
 	linkAddr, ch, err := r.ref.linkCache.GetLinkAddress(r.ref.nic.ID(), nextAddr, r.LocalAddress, r.NetProto, waker)
 	if err != nil {
 		return ch, err
@@ -145,6 +165,12 @@ func (r *Route) RemoveWaker(waker *sleep.Waker) {
 	if nextAddr == "" {
 		nextAddr = r.RemoteAddress
 	}
+
+	if r.ref.nic.neigh != nil {
+		r.ref.nic.neigh.removeWaker(nextAddr, waker)
+		return
+	}
+
 	r.ref.linkCache.RemoveWaker(r.ref.nic.ID(), nextAddr, waker)
 }
 
@@ -153,6 +179,9 @@ func (r *Route) RemoveWaker(waker *sleep.Waker) {
 //
 // The NIC r uses must not be locked.
 func (r *Route) IsResolutionRequired() bool {
+	if r.ref.nic.neigh != nil {
+		return r.ref.isValidForOutgoing() && r.ref.linkRes != nil && r.RemoteLinkAddress == ""
+	}
 	return r.ref.isValidForOutgoing() && r.ref.linkCache != nil && r.RemoteLinkAddress == ""
 }
 
@@ -163,7 +192,7 @@ func (r *Route) WritePacket(gso *GSO, params NetworkHeaderParams, pkt *PacketBuf
 	}
 
 	// WritePacket takes ownership of pkt, calculate numBytes first.
-	numBytes := pkt.Header.UsedLength() + pkt.Data.Size()
+	numBytes := pkt.Size()
 
 	err := r.ref.ep.WritePacket(r, gso, params, pkt)
 	if err != nil {
@@ -193,8 +222,7 @@ func (r *Route) WritePackets(gso *GSO, pkts PacketBufferList, params NetworkHead
 
 	writtenBytes := 0
 	for i, pb := 0, pkts.Front(); i < n && pb != nil; i, pb = i+1, pb.Next() {
-		writtenBytes += pb.Header.UsedLength()
-		writtenBytes += pb.Data.Size()
+		writtenBytes += pb.Size()
 	}
 
 	r.ref.nic.stats.Tx.Bytes.IncrementBy(uint64(writtenBytes))
@@ -273,6 +301,26 @@ func (r *Route) MakeLoopedRoute() Route {
 // Stack returns the instance of the Stack that owns this route.
 func (r *Route) Stack() *Stack {
 	return r.ref.stack()
+}
+
+// IsOutboundBroadcast returns true if the route is for an outbound broadcast
+// packet.
+func (r *Route) IsOutboundBroadcast() bool {
+	// Only IPv4 has a notion of broadcast.
+	return r.directedBroadcast || r.RemoteAddress == header.IPv4Broadcast
+}
+
+// IsInboundBroadcast returns true if the route is for an inbound broadcast
+// packet.
+func (r *Route) IsInboundBroadcast() bool {
+	// Only IPv4 has a notion of broadcast.
+	if r.LocalAddress == header.IPv4Broadcast {
+		return true
+	}
+
+	addr := r.ref.addrWithPrefix()
+	subnet := addr.Subnet()
+	return subnet.IsBroadcast(r.LocalAddress)
 }
 
 // ReverseRoute returns new route with given source and destination address.

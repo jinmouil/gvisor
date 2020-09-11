@@ -23,6 +23,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -273,7 +274,9 @@ func (e *Endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.Packe
 // WriteRawPacket implements stack.LinkEndpoint.WriteRawPacket.
 func (e *Endpoint) WriteRawPacket(vv buffer.VectorisedView) *tcpip.Error {
 	p := PacketInfo{
-		Pkt:   &stack.PacketBuffer{Data: vv},
+		Pkt: stack.NewPacketBuffer(stack.PacketBufferOptions{
+			Data: vv,
+		}),
 		Proto: 0,
 		GSO:   nil,
 	}
@@ -295,4 +298,13 @@ func (e *Endpoint) AddNotify(notify Notification) *NotificationHandle {
 // RemoveNotify removes handle from the list of notification targets.
 func (e *Endpoint) RemoveNotify(handle *NotificationHandle) {
 	e.q.RemoveNotify(handle)
+}
+
+// ARPHardwareType implements stack.LinkEndpoint.ARPHardwareType.
+func (*Endpoint) ARPHardwareType() header.ARPHardwareType {
+	return header.ARPHardwareNone
+}
+
+// AddHeader implements stack.LinkEndpoint.AddHeader.
+func (e *Endpoint) AddHeader(local, remote tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
 }

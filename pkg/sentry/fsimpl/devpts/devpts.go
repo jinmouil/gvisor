@@ -79,10 +79,11 @@ func (fstype FilesystemType) newFilesystem(vfsObj *vfs.VirtualFilesystem, creds 
 
 	// Construct the root directory. This is always inode id 1.
 	root := &rootInode{
-		slaves: make(map[uint32]*slaveInode),
+		replicas: make(map[uint32]*replicaInode),
 	}
 	root.InodeAttrs.Init(creds, linux.UNNAMED_MAJOR, devMinor, 1, linux.ModeDirectory|0555)
 	root.OrderedChildren.Init(kernfs.OrderedChildrenOptions{})
+	root.EnableLeakCheck()
 	root.dentry.Init(root)
 
 	// Construct the pts master inode and dentry. Linux always uses inode
@@ -103,18 +104,20 @@ func (fstype FilesystemType) newFilesystem(vfsObj *vfs.VirtualFilesystem, creds 
 }
 
 // Release implements vfs.FilesystemImpl.Release.
-func (fs *filesystem) Release() {
+func (fs *filesystem) Release(ctx context.Context) {
 	fs.Filesystem.VFSFilesystem().VirtualFilesystem().PutAnonBlockDevMinor(fs.devMinor)
-	fs.Filesystem.Release()
+	fs.Filesystem.Release(ctx)
 }
 
 // rootInode is the root directory inode for the devpts mounts.
 type rootInode struct {
+	implStatFS
 	kernfs.AlwaysValid
 	kernfs.InodeAttrs
 	kernfs.InodeDirectoryNoNewChildren
 	kernfs.InodeNotSymlink
 	kernfs.OrderedChildren
+	rootInodeRefs
 
 	locks vfs.FileLocks
 
@@ -130,8 +133,8 @@ type rootInode struct {
 	// mu protects the fields below.
 	mu sync.Mutex
 
-	// slaves maps pty ids to slave inodes.
-	slaves map[uint32]*slaveInode
+	// replicas maps pty ids to replica inodes.
+	replicas map[uint32]*replicaInode
 
 	// nextIdx is the next pty index to use. Must be accessed atomically.
 	//
@@ -151,22 +154,22 @@ func (i *rootInode) allocateTerminal(creds *auth.Credentials) (*Terminal, error)
 	idx := i.nextIdx
 	i.nextIdx++
 
-	// Sanity check that slave with idx does not exist.
-	if _, ok := i.slaves[idx]; ok {
+	// Sanity check that replica with idx does not exist.
+	if _, ok := i.replicas[idx]; ok {
 		panic(fmt.Sprintf("pty index collision; index %d already exists", idx))
 	}
 
-	// Create the new terminal and slave.
+	// Create the new terminal and replica.
 	t := newTerminal(idx)
-	slave := &slaveInode{
+	replica := &replicaInode{
 		root: i,
 		t:    t,
 	}
 	// Linux always uses pty index + 3 as the inode id. See
 	// fs/devpts/inode.c:devpts_pty_new().
-	slave.InodeAttrs.Init(creds, i.InodeAttrs.DevMajor(), i.InodeAttrs.DevMinor(), uint64(idx+3), linux.ModeCharacterDevice|0600)
-	slave.dentry.Init(slave)
-	i.slaves[idx] = slave
+	replica.InodeAttrs.Init(creds, i.InodeAttrs.DevMajor(), i.InodeAttrs.DevMinor(), uint64(idx+3), linux.ModeCharacterDevice|0600)
+	replica.dentry.Init(replica)
+	i.replicas[idx] = replica
 
 	return t, nil
 }
@@ -176,16 +179,18 @@ func (i *rootInode) masterClose(t *Terminal) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	// Sanity check that slave with idx exists.
-	if _, ok := i.slaves[t.n]; !ok {
+	// Sanity check that replica with idx exists.
+	if _, ok := i.replicas[t.n]; !ok {
 		panic(fmt.Sprintf("pty with index %d does not exist", t.n))
 	}
-	delete(i.slaves, t.n)
+	delete(i.replicas, t.n)
 }
 
 // Open implements kernfs.Inode.Open.
 func (i *rootInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &i.locks, &opts)
+	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &i.locks, &opts, kernfs.GenericDirectoryFDOptions{
+		SeekEnd: kernfs.SeekEndStaticEntries,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +205,7 @@ func (i *rootInode) Lookup(ctx context.Context, name string) (*vfs.Dentry, error
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if si, ok := i.slaves[uint32(idx)]; ok {
+	if si, ok := i.replicas[uint32(idx)]; ok {
 		si.dentry.IncRef()
 		return si.dentry.VFSDentry(), nil
 
@@ -212,8 +217,8 @@ func (i *rootInode) Lookup(ctx context.Context, name string) (*vfs.Dentry, error
 func (i *rootInode) IterDirents(ctx context.Context, cb vfs.IterDirentsCallback, offset, relOffset int64) (int64, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	ids := make([]int, 0, len(i.slaves))
-	for id := range i.slaves {
+	ids := make([]int, 0, len(i.replicas))
+	for id := range i.replicas {
 		ids = append(ids, int(id))
 	}
 	sort.Ints(ids)
@@ -221,7 +226,7 @@ func (i *rootInode) IterDirents(ctx context.Context, cb vfs.IterDirentsCallback,
 		dirent := vfs.Dirent{
 			Name:    strconv.FormatUint(uint64(id), 10),
 			Type:    linux.DT_CHR,
-			Ino:     i.slaves[uint32(id)].InodeAttrs.Ino(),
+			Ino:     i.replicas[uint32(id)].InodeAttrs.Ino(),
 			NextOff: offset + 1,
 		}
 		if err := cb.Handle(dirent); err != nil {
@@ -230,4 +235,16 @@ func (i *rootInode) IterDirents(ctx context.Context, cb vfs.IterDirentsCallback,
 		offset++
 	}
 	return offset, nil
+}
+
+// DecRef implements kernfs.Inode.
+func (i *rootInode) DecRef(context.Context) {
+	i.rootInodeRefs.DecRef(i.Destroy)
+}
+
+type implStatFS struct{}
+
+// StatFS implements kernfs.Inode.StatFS.
+func (*implStatFS) StatFS(context.Context, *vfs.Filesystem) (linux.Statfs, error) {
+	return vfs.GenericStatFS(linux.DEVPTS_SUPER_MAGIC), nil
 }

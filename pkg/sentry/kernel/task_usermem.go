@@ -143,8 +143,9 @@ func (t *Task) CopyInVector(addr usermem.Addr, maxElemSize, maxTotalSize int) ([
 // CopyOutIovecs converts src to an array of struct iovecs and copies it to the
 // memory mapped at addr.
 //
-// Preconditions: As for usermem.IO.CopyOut. The caller must be running on the
-// task goroutine. t's AddressSpace must be active.
+// Preconditions: Same as usermem.IO.CopyOut, plus:
+// * The caller must be running on the task goroutine.
+// * t's AddressSpace must be active.
 func (t *Task) CopyOutIovecs(addr usermem.Addr, src usermem.AddrRangeSeq) error {
 	switch t.Arch().Width() {
 	case 8:
@@ -191,8 +192,9 @@ func (t *Task) CopyOutIovecs(addr usermem.Addr, src usermem.AddrRangeSeq) error 
 // combined length of all AddrRanges would otherwise exceed this amount, ranges
 // beyond MAX_RW_COUNT are silently truncated.
 //
-// Preconditions: As for usermem.IO.CopyIn. The caller must be running on the
-// task goroutine. t's AddressSpace must be active.
+// Preconditions: Same as usermem.IO.CopyIn, plus:
+// * The caller must be running on the task goroutine.
+// * t's AddressSpace must be active.
 func (t *Task) CopyInIovecs(addr usermem.Addr, numIovecs int) (usermem.AddrRangeSeq, error) {
 	if numIovecs == 0 {
 		return usermem.AddrRangeSeq{}, nil
@@ -284,7 +286,7 @@ func (t *Task) SingleIOSequence(addr usermem.Addr, length int, opts usermem.IOOp
 //
 // IovecsIOSequence is analogous to Linux's lib/iov_iter.c:import_iovec().
 //
-// Preconditions: As for Task.CopyInIovecs.
+// Preconditions: Same as Task.CopyInIovecs.
 func (t *Task) IovecsIOSequence(addr usermem.Addr, iovcnt int, opts usermem.IOOpts) (usermem.IOSequence, error) {
 	if iovcnt < 0 || iovcnt > linux.UIO_MAXIOV {
 		return usermem.IOSequence{}, syserror.EINVAL
@@ -298,4 +300,31 @@ func (t *Task) IovecsIOSequence(addr usermem.Addr, iovcnt int, opts usermem.IOOp
 		Addrs: ars,
 		Opts:  opts,
 	}, nil
+}
+
+// CopyContextWithOpts wraps a task to allow copying memory to and from the
+// task memory with user specified usermem.IOOpts.
+type CopyContextWithOpts struct {
+	*Task
+	opts usermem.IOOpts
+}
+
+// AsCopyContextWithOpts wraps the task and returns it as CopyContextWithOpts.
+func (t *Task) AsCopyContextWithOpts(opts usermem.IOOpts) *CopyContextWithOpts {
+	return &CopyContextWithOpts{t, opts}
+}
+
+// CopyInString copies a string in from the task's memory.
+func (t *CopyContextWithOpts) CopyInString(addr usermem.Addr, maxLen int) (string, error) {
+	return usermem.CopyStringIn(t, t.MemoryManager(), addr, maxLen, t.opts)
+}
+
+// CopyInBytes copies task memory into dst from an IO context.
+func (t *CopyContextWithOpts) CopyInBytes(addr usermem.Addr, dst []byte) (int, error) {
+	return t.MemoryManager().CopyIn(t, addr, dst, t.opts)
+}
+
+// CopyOutBytes copies src into task memoryfrom an IO context.
+func (t *CopyContextWithOpts) CopyOutBytes(addr usermem.Addr, src []byte) (int, error) {
+	return t.MemoryManager().CopyOut(t, addr, src, t.opts)
 }

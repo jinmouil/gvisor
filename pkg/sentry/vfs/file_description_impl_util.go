@@ -56,6 +56,12 @@ func (FileDescriptionDefaultImpl) StatFS(ctx context.Context) (linux.Statfs, err
 	return linux.Statfs{}, syserror.ENOSYS
 }
 
+// Allocate implements FileDescriptionImpl.Allocate analogously to
+// fallocate called on regular file, directory or FIFO in Linux.
+func (FileDescriptionDefaultImpl) Allocate(ctx context.Context, mode, offset, length uint64) error {
+	return syserror.ENODEV
+}
+
 // Readiness implements waiter.Waitable.Readiness analogously to
 // file_operations::poll == NULL in Linux.
 func (FileDescriptionDefaultImpl) Readiness(mask waiter.EventMask) waiter.EventMask {
@@ -101,7 +107,7 @@ func (FileDescriptionDefaultImpl) Write(ctx context.Context, src usermem.IOSeque
 // file_operations::iterate == file_operations::iterate_shared == NULL in
 // Linux.
 func (FileDescriptionDefaultImpl) IterDirents(ctx context.Context, cb IterDirentsCallback) error {
-	return syserror.ENOTDIR
+	return syserror.ENOSYS
 }
 
 // Seek implements FileDescriptionImpl.Seek analogously to
@@ -128,28 +134,28 @@ func (FileDescriptionDefaultImpl) Ioctl(ctx context.Context, uio usermem.IO, arg
 	return 0, syserror.ENOTTY
 }
 
-// Listxattr implements FileDescriptionImpl.Listxattr analogously to
+// ListXattr implements FileDescriptionImpl.ListXattr analogously to
 // inode_operations::listxattr == NULL in Linux.
-func (FileDescriptionDefaultImpl) Listxattr(ctx context.Context, size uint64) ([]string, error) {
-	// This isn't exactly accurate; see FileDescription.Listxattr.
+func (FileDescriptionDefaultImpl) ListXattr(ctx context.Context, size uint64) ([]string, error) {
+	// This isn't exactly accurate; see FileDescription.ListXattr.
 	return nil, syserror.ENOTSUP
 }
 
-// Getxattr implements FileDescriptionImpl.Getxattr analogously to
+// GetXattr implements FileDescriptionImpl.GetXattr analogously to
 // inode::i_opflags & IOP_XATTR == 0 in Linux.
-func (FileDescriptionDefaultImpl) Getxattr(ctx context.Context, opts GetxattrOptions) (string, error) {
+func (FileDescriptionDefaultImpl) GetXattr(ctx context.Context, opts GetXattrOptions) (string, error) {
 	return "", syserror.ENOTSUP
 }
 
-// Setxattr implements FileDescriptionImpl.Setxattr analogously to
+// SetXattr implements FileDescriptionImpl.SetXattr analogously to
 // inode::i_opflags & IOP_XATTR == 0 in Linux.
-func (FileDescriptionDefaultImpl) Setxattr(ctx context.Context, opts SetxattrOptions) error {
+func (FileDescriptionDefaultImpl) SetXattr(ctx context.Context, opts SetXattrOptions) error {
 	return syserror.ENOTSUP
 }
 
-// Removexattr implements FileDescriptionImpl.Removexattr analogously to
+// RemoveXattr implements FileDescriptionImpl.RemoveXattr analogously to
 // inode::i_opflags & IOP_XATTR == 0 in Linux.
-func (FileDescriptionDefaultImpl) Removexattr(ctx context.Context, name string) error {
+func (FileDescriptionDefaultImpl) RemoveXattr(ctx context.Context, name string) error {
 	return syserror.ENOTSUP
 }
 
@@ -157,6 +163,11 @@ func (FileDescriptionDefaultImpl) Removexattr(ctx context.Context, name string) 
 // FileDescriptionImpl that always represent directories to obtain
 // implementations of non-directory I/O methods that return EISDIR.
 type DirectoryFileDescriptionDefaultImpl struct{}
+
+// Allocate implements DirectoryFileDescriptionDefaultImpl.Allocate.
+func (DirectoryFileDescriptionDefaultImpl) Allocate(ctx context.Context, mode, offset, length uint64) error {
+	return syserror.EISDIR
+}
 
 // PRead implements FileDescriptionImpl.PRead.
 func (DirectoryFileDescriptionDefaultImpl) PRead(ctx context.Context, dst usermem.IOSequence, offset int64, opts ReadOptions) (int64, error) {
@@ -327,7 +338,7 @@ func (fd *DynamicBytesFileDescriptionImpl) pwriteLocked(ctx context.Context, src
 
 	writable, ok := fd.data.(WritableDynamicBytesSource)
 	if !ok {
-		return 0, syserror.EINVAL
+		return 0, syserror.EIO
 	}
 	n, err := writable.Write(ctx, src, offset)
 	if err != nil {

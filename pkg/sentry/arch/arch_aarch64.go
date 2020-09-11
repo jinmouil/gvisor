@@ -28,7 +28,14 @@ import (
 )
 
 // Registers represents the CPU registers for this architecture.
-type Registers = linux.PtraceRegs
+//
+// +stateify savable
+type Registers struct {
+	linux.PtraceRegs
+
+	// TPIDR_EL0 is the EL0 Read/Write Software Thread ID Register.
+	TPIDR_EL0 uint64
+}
 
 const (
 	// SyscallWidth is the width of insturctions.
@@ -94,15 +101,14 @@ func NewFloatingPointData() *FloatingPointData {
 
 // State contains the common architecture bits for aarch64 (the build tag of this
 // file ensures it's only built on aarch64).
+//
+// +stateify savable
 type State struct {
 	// The system registers.
 	Regs Registers
 
 	// Our floating point state.
 	aarch64FPState `state:"wait"`
-
-	// TLS pointer
-	TPValue uint64
 
 	// FeatureSet is a pointer to the currently active feature set.
 	FeatureSet *cpuid.FeatureSet
@@ -157,7 +163,6 @@ func (s *State) Fork() State {
 	return State{
 		Regs:           s.Regs,
 		aarch64FPState: s.aarch64FPState.fork(),
-		TPValue:        s.TPValue,
 		FeatureSet:     s.FeatureSet,
 		OrigR0:         s.OrigR0,
 	}
@@ -241,18 +246,18 @@ func (s *State) ptraceGetRegs() Registers {
 	return s.Regs
 }
 
-var registersSize = (*Registers)(nil).SizeBytes()
+var ptraceRegistersSize = (*linux.PtraceRegs)(nil).SizeBytes()
 
 // PtraceSetRegs implements Context.PtraceSetRegs.
 func (s *State) PtraceSetRegs(src io.Reader) (int, error) {
 	var regs Registers
-	buf := make([]byte, registersSize)
+	buf := make([]byte, ptraceRegistersSize)
 	if _, err := io.ReadFull(src, buf); err != nil {
 		return 0, err
 	}
 	regs.UnmarshalUnsafe(buf)
 	s.Regs = regs
-	return registersSize, nil
+	return ptraceRegistersSize, nil
 }
 
 // PtraceGetFPRegs implements Context.PtraceGetFPRegs.
@@ -278,7 +283,7 @@ const (
 func (s *State) PtraceGetRegSet(regset uintptr, dst io.Writer, maxlen int) (int, error) {
 	switch regset {
 	case _NT_PRSTATUS:
-		if maxlen < registersSize {
+		if maxlen < ptraceRegistersSize {
 			return 0, syserror.EFAULT
 		}
 		return s.PtraceGetRegs(dst)
@@ -291,7 +296,7 @@ func (s *State) PtraceGetRegSet(regset uintptr, dst io.Writer, maxlen int) (int,
 func (s *State) PtraceSetRegSet(regset uintptr, src io.Reader, maxlen int) (int, error) {
 	switch regset {
 	case _NT_PRSTATUS:
-		if maxlen < registersSize {
+		if maxlen < ptraceRegistersSize {
 			return 0, syserror.EFAULT
 		}
 		return s.PtraceSetRegs(src)

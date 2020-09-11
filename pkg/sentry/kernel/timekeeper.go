@@ -21,8 +21,8 @@ import (
 
 	"gvisor.dev/gvisor/pkg/log"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
+	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
-	"gvisor.dev/gvisor/pkg/sentry/platform"
 	sentrytime "gvisor.dev/gvisor/pkg/sentry/time"
 	"gvisor.dev/gvisor/pkg/sync"
 )
@@ -90,7 +90,7 @@ type Timekeeper struct {
 // NewTimekeeper does not take ownership of paramPage.
 //
 // SetClocks must be called on the returned Timekeeper before it is usable.
-func NewTimekeeper(mfp pgalloc.MemoryFileProvider, paramPage platform.FileRange) (*Timekeeper, error) {
+func NewTimekeeper(mfp pgalloc.MemoryFileProvider, paramPage memmap.FileRange) (*Timekeeper, error) {
 	return &Timekeeper{
 		params: NewVDSOParamPage(mfp, paramPage),
 	}, nil
@@ -210,9 +210,6 @@ func (t *Timekeeper) startUpdater() {
 					p.realtimeBaseRef = int64(realtimeParams.BaseRef)
 					p.realtimeFrequency = realtimeParams.Frequency
 				}
-
-				log.Debugf("Updating VDSO parameters: %+v", p)
-
 				return p
 			}); err != nil {
 				log.Warningf("Unable to update VDSO parameter page: %v", err)

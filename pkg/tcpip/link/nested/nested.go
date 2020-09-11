@@ -20,6 +20,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -57,6 +58,16 @@ func (e *Endpoint) DeliverNetworkPacket(remote, local tcpip.LinkAddress, protoco
 	e.mu.RUnlock()
 	if d != nil {
 		d.DeliverNetworkPacket(remote, local, protocol, pkt)
+	}
+}
+
+// DeliverOutboundPacket implements stack.NetworkDispatcher.DeliverOutboundPacket.
+func (e *Endpoint) DeliverOutboundPacket(remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	e.mu.RLock()
+	d := e.dispatcher
+	e.mu.RUnlock()
+	if d != nil {
+		d.DeliverOutboundPacket(remote, local, protocol, pkt)
 	}
 }
 
@@ -128,4 +139,14 @@ func (e *Endpoint) GSOMaxSize() uint32 {
 		return e.GSOMaxSize()
 	}
 	return 0
+}
+
+// ARPHardwareType implements stack.LinkEndpoint.ARPHardwareType
+func (e *Endpoint) ARPHardwareType() header.ARPHardwareType {
+	return e.child.ARPHardwareType()
+}
+
+// AddHeader implements stack.LinkEndpoint.AddHeader.
+func (e *Endpoint) AddHeader(local, remote tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	e.child.AddHeader(local, remote, protocol, pkt)
 }

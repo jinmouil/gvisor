@@ -25,6 +25,7 @@ import (
 	"gvisor.dev/gvisor/pkg/gate"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -56,6 +57,15 @@ func (e *Endpoint) DeliverNetworkPacket(remote, local tcpip.LinkAddress, protoco
 	}
 
 	e.dispatcher.DeliverNetworkPacket(remote, local, protocol, pkt)
+	e.dispatchGate.Leave()
+}
+
+// DeliverOutboundPacket implements stack.NetworkDispatcher.DeliverOutboundPacket.
+func (e *Endpoint) DeliverOutboundPacket(remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	if !e.dispatchGate.Enter() {
+		return
+	}
+	e.dispatcher.DeliverOutboundPacket(remote, local, protocol, pkt)
 	e.dispatchGate.Leave()
 }
 
@@ -147,3 +157,13 @@ func (e *Endpoint) WaitDispatch() {
 
 // Wait implements stack.LinkEndpoint.Wait.
 func (e *Endpoint) Wait() {}
+
+// ARPHardwareType implements stack.LinkEndpoint.ARPHardwareType.
+func (e *Endpoint) ARPHardwareType() header.ARPHardwareType {
+	return e.lower.ARPHardwareType()
+}
+
+// AddHeader implements stack.LinkEndpoint.AddHeader.
+func (e *Endpoint) AddHeader(local, remote tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	e.lower.AddHeader(local, remote, protocol, pkt)
+}

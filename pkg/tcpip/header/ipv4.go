@@ -101,6 +101,11 @@ const (
 	// IPv4Version is the version of the ipv4 protocol.
 	IPv4Version = 4
 
+	// IPv4AllSystems is the all systems IPv4 multicast address as per
+	// IANA's IPv4 Multicast Address Space Registry. See
+	// https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml.
+	IPv4AllSystems tcpip.Address = "\xe0\x00\x00\x01"
+
 	// IPv4Broadcast is the broadcast address of the IPv4 procotol.
 	IPv4Broadcast tcpip.Address = "\xff\xff\xff\xff"
 
@@ -309,4 +314,13 @@ func IsV4MulticastAddress(addr tcpip.Address) bool {
 		return false
 	}
 	return (addr[0] & 0xf0) == 0xe0
+}
+
+// IsV4LoopbackAddress determines if the provided address is an IPv4 loopback
+// address (belongs to 127.0.0.1/8 subnet).
+func IsV4LoopbackAddress(addr tcpip.Address) bool {
+	if len(addr) != IPv4AddressSize {
+		return false
+	}
+	return addr[0] == 0x7f
 }

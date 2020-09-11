@@ -77,9 +77,9 @@ func (ft FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.VirtualF
 }
 
 // Release implements vfs.FilesystemImpl.Release.
-func (fs *filesystem) Release() {
+func (fs *filesystem) Release(ctx context.Context) {
 	fs.Filesystem.VFSFilesystem().VirtualFilesystem().PutAnonBlockDevMinor(fs.devMinor)
-	fs.Filesystem.Release()
+	fs.Filesystem.Release(ctx)
 }
 
 // dynamicInode is an overfitted interface for common Inodes with
@@ -110,8 +110,21 @@ func newStaticFile(data string) *staticFile {
 	return &staticFile{StaticData: vfs.StaticData{Data: data}}
 }
 
+func newStaticDir(creds *auth.Credentials, devMajor, devMinor uint32, ino uint64, perm linux.FileMode, children map[string]*kernfs.Dentry) *kernfs.Dentry {
+	return kernfs.NewStaticDir(creds, devMajor, devMinor, ino, perm, children, kernfs.GenericDirectoryFDOptions{
+		SeekEnd: kernfs.SeekEndZero,
+	})
+}
+
 // InternalData contains internal data passed in to the procfs mount via
 // vfs.GetFilesystemOptions.InternalData.
 type InternalData struct {
 	Cgroups map[string]string
+}
+
+type implStatFS struct{}
+
+// StatFS implements kernfs.Inode.StatFS.
+func (*implStatFS) StatFS(context.Context, *vfs.Filesystem) (linux.Statfs, error) {
+	return vfs.GenericStatFS(linux.PROC_SUPER_MAGIC), nil
 }

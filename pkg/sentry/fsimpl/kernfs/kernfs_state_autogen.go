@@ -6,97 +6,275 @@ import (
 	"gvisor.dev/gvisor/pkg/state"
 )
 
-func (x *DynamicBytesFile) beforeSave() {}
-func (x *DynamicBytesFile) save(m state.Map) {
+func (x *DentryRefs) StateTypeName() string {
+	return "pkg/sentry/fsimpl/kernfs.DentryRefs"
+}
+
+func (x *DentryRefs) StateFields() []string {
+	return []string{
+		"refCount",
+	}
+}
+
+func (x *DentryRefs) beforeSave() {}
+
+func (x *DentryRefs) StateSave(m state.Sink) {
 	x.beforeSave()
-	m.Save("InodeAttrs", &x.InodeAttrs)
-	m.Save("InodeNoopRefCount", &x.InodeNoopRefCount)
-	m.Save("InodeNotDirectory", &x.InodeNotDirectory)
-	m.Save("InodeNotSymlink", &x.InodeNotSymlink)
-	m.Save("locks", &x.locks)
-	m.Save("data", &x.data)
+	m.Save(0, &x.refCount)
+}
+
+func (x *DentryRefs) afterLoad() {}
+
+func (x *DentryRefs) StateLoad(m state.Source) {
+	m.Load(0, &x.refCount)
+}
+
+func (x *DynamicBytesFile) StateTypeName() string {
+	return "pkg/sentry/fsimpl/kernfs.DynamicBytesFile"
+}
+
+func (x *DynamicBytesFile) StateFields() []string {
+	return []string{
+		"InodeAttrs",
+		"InodeNoStatFS",
+		"InodeNoopRefCount",
+		"InodeNotDirectory",
+		"InodeNotSymlink",
+		"locks",
+		"data",
+	}
+}
+
+func (x *DynamicBytesFile) beforeSave() {}
+
+func (x *DynamicBytesFile) StateSave(m state.Sink) {
+	x.beforeSave()
+	m.Save(0, &x.InodeAttrs)
+	m.Save(1, &x.InodeNoStatFS)
+	m.Save(2, &x.InodeNoopRefCount)
+	m.Save(3, &x.InodeNotDirectory)
+	m.Save(4, &x.InodeNotSymlink)
+	m.Save(5, &x.locks)
+	m.Save(6, &x.data)
 }
 
 func (x *DynamicBytesFile) afterLoad() {}
-func (x *DynamicBytesFile) load(m state.Map) {
-	m.Load("InodeAttrs", &x.InodeAttrs)
-	m.Load("InodeNoopRefCount", &x.InodeNoopRefCount)
-	m.Load("InodeNotDirectory", &x.InodeNotDirectory)
-	m.Load("InodeNotSymlink", &x.InodeNotSymlink)
-	m.Load("locks", &x.locks)
-	m.Load("data", &x.data)
+
+func (x *DynamicBytesFile) StateLoad(m state.Source) {
+	m.Load(0, &x.InodeAttrs)
+	m.Load(1, &x.InodeNoStatFS)
+	m.Load(2, &x.InodeNoopRefCount)
+	m.Load(3, &x.InodeNotDirectory)
+	m.Load(4, &x.InodeNotSymlink)
+	m.Load(5, &x.locks)
+	m.Load(6, &x.data)
+}
+
+func (x *DynamicBytesFD) StateTypeName() string {
+	return "pkg/sentry/fsimpl/kernfs.DynamicBytesFD"
+}
+
+func (x *DynamicBytesFD) StateFields() []string {
+	return []string{
+		"FileDescriptionDefaultImpl",
+		"DynamicBytesFileDescriptionImpl",
+		"LockFD",
+		"vfsfd",
+		"inode",
+	}
 }
 
 func (x *DynamicBytesFD) beforeSave() {}
-func (x *DynamicBytesFD) save(m state.Map) {
+
+func (x *DynamicBytesFD) StateSave(m state.Sink) {
 	x.beforeSave()
-	m.Save("FileDescriptionDefaultImpl", &x.FileDescriptionDefaultImpl)
-	m.Save("DynamicBytesFileDescriptionImpl", &x.DynamicBytesFileDescriptionImpl)
-	m.Save("LockFD", &x.LockFD)
-	m.Save("vfsfd", &x.vfsfd)
-	m.Save("inode", &x.inode)
+	m.Save(0, &x.FileDescriptionDefaultImpl)
+	m.Save(1, &x.DynamicBytesFileDescriptionImpl)
+	m.Save(2, &x.LockFD)
+	m.Save(3, &x.vfsfd)
+	m.Save(4, &x.inode)
 }
 
 func (x *DynamicBytesFD) afterLoad() {}
-func (x *DynamicBytesFD) load(m state.Map) {
-	m.Load("FileDescriptionDefaultImpl", &x.FileDescriptionDefaultImpl)
-	m.Load("DynamicBytesFileDescriptionImpl", &x.DynamicBytesFileDescriptionImpl)
-	m.Load("LockFD", &x.LockFD)
-	m.Load("vfsfd", &x.vfsfd)
-	m.Load("inode", &x.inode)
+
+func (x *DynamicBytesFD) StateLoad(m state.Source) {
+	m.Load(0, &x.FileDescriptionDefaultImpl)
+	m.Load(1, &x.DynamicBytesFileDescriptionImpl)
+	m.Load(2, &x.LockFD)
+	m.Load(3, &x.vfsfd)
+	m.Load(4, &x.inode)
+}
+
+func (x *StaticDirectory) StateTypeName() string {
+	return "pkg/sentry/fsimpl/kernfs.StaticDirectory"
+}
+
+func (x *StaticDirectory) StateFields() []string {
+	return []string{
+		"InodeAttrs",
+		"InodeDirectoryNoNewChildren",
+		"InodeNoDynamicLookup",
+		"InodeNoStatFS",
+		"InodeNotSymlink",
+		"OrderedChildren",
+		"StaticDirectoryRefs",
+		"locks",
+		"fdOpts",
+	}
 }
 
 func (x *StaticDirectory) beforeSave() {}
-func (x *StaticDirectory) save(m state.Map) {
+
+func (x *StaticDirectory) StateSave(m state.Sink) {
 	x.beforeSave()
-	m.Save("InodeNotSymlink", &x.InodeNotSymlink)
-	m.Save("InodeDirectoryNoNewChildren", &x.InodeDirectoryNoNewChildren)
-	m.Save("InodeAttrs", &x.InodeAttrs)
-	m.Save("InodeNoDynamicLookup", &x.InodeNoDynamicLookup)
-	m.Save("OrderedChildren", &x.OrderedChildren)
-	m.Save("locks", &x.locks)
+	m.Save(0, &x.InodeAttrs)
+	m.Save(1, &x.InodeDirectoryNoNewChildren)
+	m.Save(2, &x.InodeNoDynamicLookup)
+	m.Save(3, &x.InodeNoStatFS)
+	m.Save(4, &x.InodeNotSymlink)
+	m.Save(5, &x.OrderedChildren)
+	m.Save(6, &x.StaticDirectoryRefs)
+	m.Save(7, &x.locks)
+	m.Save(8, &x.fdOpts)
 }
 
 func (x *StaticDirectory) afterLoad() {}
-func (x *StaticDirectory) load(m state.Map) {
-	m.Load("InodeNotSymlink", &x.InodeNotSymlink)
-	m.Load("InodeDirectoryNoNewChildren", &x.InodeDirectoryNoNewChildren)
-	m.Load("InodeAttrs", &x.InodeAttrs)
-	m.Load("InodeNoDynamicLookup", &x.InodeNoDynamicLookup)
-	m.Load("OrderedChildren", &x.OrderedChildren)
-	m.Load("locks", &x.locks)
+
+func (x *StaticDirectory) StateLoad(m state.Source) {
+	m.Load(0, &x.InodeAttrs)
+	m.Load(1, &x.InodeDirectoryNoNewChildren)
+	m.Load(2, &x.InodeNoDynamicLookup)
+	m.Load(3, &x.InodeNoStatFS)
+	m.Load(4, &x.InodeNotSymlink)
+	m.Load(5, &x.OrderedChildren)
+	m.Load(6, &x.StaticDirectoryRefs)
+	m.Load(7, &x.locks)
+	m.Load(8, &x.fdOpts)
+}
+
+func (x *slotList) StateTypeName() string {
+	return "pkg/sentry/fsimpl/kernfs.slotList"
+}
+
+func (x *slotList) StateFields() []string {
+	return []string{
+		"head",
+		"tail",
+	}
 }
 
 func (x *slotList) beforeSave() {}
-func (x *slotList) save(m state.Map) {
+
+func (x *slotList) StateSave(m state.Sink) {
 	x.beforeSave()
-	m.Save("head", &x.head)
-	m.Save("tail", &x.tail)
+	m.Save(0, &x.head)
+	m.Save(1, &x.tail)
 }
 
 func (x *slotList) afterLoad() {}
-func (x *slotList) load(m state.Map) {
-	m.Load("head", &x.head)
-	m.Load("tail", &x.tail)
+
+func (x *slotList) StateLoad(m state.Source) {
+	m.Load(0, &x.head)
+	m.Load(1, &x.tail)
+}
+
+func (x *slotEntry) StateTypeName() string {
+	return "pkg/sentry/fsimpl/kernfs.slotEntry"
+}
+
+func (x *slotEntry) StateFields() []string {
+	return []string{
+		"next",
+		"prev",
+	}
 }
 
 func (x *slotEntry) beforeSave() {}
-func (x *slotEntry) save(m state.Map) {
+
+func (x *slotEntry) StateSave(m state.Sink) {
 	x.beforeSave()
-	m.Save("next", &x.next)
-	m.Save("prev", &x.prev)
+	m.Save(0, &x.next)
+	m.Save(1, &x.prev)
 }
 
 func (x *slotEntry) afterLoad() {}
-func (x *slotEntry) load(m state.Map) {
-	m.Load("next", &x.next)
-	m.Load("prev", &x.prev)
+
+func (x *slotEntry) StateLoad(m state.Source) {
+	m.Load(0, &x.next)
+	m.Load(1, &x.prev)
+}
+
+func (x *StaticDirectoryRefs) StateTypeName() string {
+	return "pkg/sentry/fsimpl/kernfs.StaticDirectoryRefs"
+}
+
+func (x *StaticDirectoryRefs) StateFields() []string {
+	return []string{
+		"refCount",
+	}
+}
+
+func (x *StaticDirectoryRefs) beforeSave() {}
+
+func (x *StaticDirectoryRefs) StateSave(m state.Sink) {
+	x.beforeSave()
+	m.Save(0, &x.refCount)
+}
+
+func (x *StaticDirectoryRefs) afterLoad() {}
+
+func (x *StaticDirectoryRefs) StateLoad(m state.Source) {
+	m.Load(0, &x.refCount)
+}
+
+func (x *syntheticDirectory) StateTypeName() string {
+	return "pkg/sentry/fsimpl/kernfs.syntheticDirectory"
+}
+
+func (x *syntheticDirectory) StateFields() []string {
+	return []string{
+		"InodeAttrs",
+		"InodeNoStatFS",
+		"InodeNoopRefCount",
+		"InodeNoDynamicLookup",
+		"InodeNotSymlink",
+		"OrderedChildren",
+		"locks",
+	}
+}
+
+func (x *syntheticDirectory) beforeSave() {}
+
+func (x *syntheticDirectory) StateSave(m state.Sink) {
+	x.beforeSave()
+	m.Save(0, &x.InodeAttrs)
+	m.Save(1, &x.InodeNoStatFS)
+	m.Save(2, &x.InodeNoopRefCount)
+	m.Save(3, &x.InodeNoDynamicLookup)
+	m.Save(4, &x.InodeNotSymlink)
+	m.Save(5, &x.OrderedChildren)
+	m.Save(6, &x.locks)
+}
+
+func (x *syntheticDirectory) afterLoad() {}
+
+func (x *syntheticDirectory) StateLoad(m state.Source) {
+	m.Load(0, &x.InodeAttrs)
+	m.Load(1, &x.InodeNoStatFS)
+	m.Load(2, &x.InodeNoopRefCount)
+	m.Load(3, &x.InodeNoDynamicLookup)
+	m.Load(4, &x.InodeNotSymlink)
+	m.Load(5, &x.OrderedChildren)
+	m.Load(6, &x.locks)
 }
 
 func init() {
-	state.Register("pkg/sentry/fsimpl/kernfs.DynamicBytesFile", (*DynamicBytesFile)(nil), state.Fns{Save: (*DynamicBytesFile).save, Load: (*DynamicBytesFile).load})
-	state.Register("pkg/sentry/fsimpl/kernfs.DynamicBytesFD", (*DynamicBytesFD)(nil), state.Fns{Save: (*DynamicBytesFD).save, Load: (*DynamicBytesFD).load})
-	state.Register("pkg/sentry/fsimpl/kernfs.StaticDirectory", (*StaticDirectory)(nil), state.Fns{Save: (*StaticDirectory).save, Load: (*StaticDirectory).load})
-	state.Register("pkg/sentry/fsimpl/kernfs.slotList", (*slotList)(nil), state.Fns{Save: (*slotList).save, Load: (*slotList).load})
-	state.Register("pkg/sentry/fsimpl/kernfs.slotEntry", (*slotEntry)(nil), state.Fns{Save: (*slotEntry).save, Load: (*slotEntry).load})
+	state.Register((*DentryRefs)(nil))
+	state.Register((*DynamicBytesFile)(nil))
+	state.Register((*DynamicBytesFD)(nil))
+	state.Register((*StaticDirectory)(nil))
+	state.Register((*slotList)(nil))
+	state.Register((*slotEntry)(nil))
+	state.Register((*StaticDirectoryRefs)(nil))
+	state.Register((*syntheticDirectory)(nil))
 }

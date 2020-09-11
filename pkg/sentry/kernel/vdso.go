@@ -19,8 +19,8 @@ import (
 
 	"gvisor.dev/gvisor/pkg/binary"
 	"gvisor.dev/gvisor/pkg/safemem"
+	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
-	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
@@ -58,7 +58,7 @@ type vdsoParams struct {
 type VDSOParamPage struct {
 	// The parameter page is fr, allocated from mfp.MemoryFile().
 	mfp pgalloc.MemoryFileProvider
-	fr  platform.FileRange
+	fr  memmap.FileRange
 
 	// seq is the current sequence count written to the page.
 	//
@@ -73,15 +73,12 @@ type VDSOParamPage struct {
 // NewVDSOParamPage returns a VDSOParamPage.
 //
 // Preconditions:
-//
 // * fr is a single page allocated from mfp.MemoryFile(). VDSOParamPage does
 //   not take ownership of fr; it must remain allocated for the lifetime of the
 //   VDSOParamPage.
-//
 // * VDSOParamPage must be the only writer to fr.
-//
 // * mfp.MemoryFile().MapInternal(fr) must return a single safemem.Block.
-func NewVDSOParamPage(mfp pgalloc.MemoryFileProvider, fr platform.FileRange) *VDSOParamPage {
+func NewVDSOParamPage(mfp pgalloc.MemoryFileProvider, fr memmap.FileRange) *VDSOParamPage {
 	return &VDSOParamPage{mfp: mfp, fr: fr}
 }
 

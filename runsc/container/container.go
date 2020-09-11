@@ -37,6 +37,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/sighandling"
 	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/cgroup"
+	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/sandbox"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
@@ -269,7 +270,7 @@ type Args struct {
 // New creates the container in a new Sandbox process, unless the metadata
 // indicates that an existing Sandbox should be used. The caller must call
 // Destroy() on the container.
-func New(conf *boot.Config, args Args) (*Container, error) {
+func New(conf *config.Config, args Args) (*Container, error) {
 	log.Debugf("Create container %q in root dir: %s", args.ID, conf.RootDir)
 	if err := validateID(args.ID); err != nil {
 		return nil, err
@@ -324,7 +325,7 @@ func New(conf *boot.Config, args Args) (*Container, error) {
 			}
 		}
 		if err := runInCgroup(cg, func() error {
-			ioFiles, specFile, err := c.createGoferProcess(args.Spec, conf, args.BundleDir)
+			ioFiles, specFile, err := c.createGoferProcess(args.Spec, conf, args.BundleDir, args.Attached)
 			if err != nil {
 				return err
 			}
@@ -397,7 +398,7 @@ func New(conf *boot.Config, args Args) (*Container, error) {
 }
 
 // Start starts running the containerized process inside the sandbox.
-func (c *Container) Start(conf *boot.Config) error {
+func (c *Container) Start(conf *config.Config) error {
 	log.Debugf("Start container %q", c.ID)
 
 	if err := c.Saver.lock(); err != nil {
@@ -427,7 +428,7 @@ func (c *Container) Start(conf *boot.Config) error {
 		// the start (and all their children processes).
 		if err := runInCgroup(c.Sandbox.Cgroup, func() error {
 			// Create the gofer process.
-			ioFiles, mountsFile, err := c.createGoferProcess(c.Spec, conf, c.BundleDir)
+			ioFiles, mountsFile, err := c.createGoferProcess(c.Spec, conf, c.BundleDir, false)
 			if err != nil {
 				return err
 			}
@@ -472,7 +473,7 @@ func (c *Container) Start(conf *boot.Config) error {
 
 // Restore takes a container and replaces its kernel and file system
 // to restore a container from its state file.
-func (c *Container) Restore(spec *specs.Spec, conf *boot.Config, restoreFile string) error {
+func (c *Container) Restore(spec *specs.Spec, conf *config.Config, restoreFile string) error {
 	log.Debugf("Restore container %q", c.ID)
 	if err := c.Saver.lock(); err != nil {
 		return err
@@ -499,7 +500,7 @@ func (c *Container) Restore(spec *specs.Spec, conf *boot.Config, restoreFile str
 }
 
 // Run is a helper that calls Create + Start + Wait.
-func Run(conf *boot.Config, args Args) (syscall.WaitStatus, error) {
+func Run(conf *config.Config, args Args) (syscall.WaitStatus, error) {
 	log.Debugf("Run container %q in root dir: %s", args.ID, conf.RootDir)
 	c, err := New(conf, args)
 	if err != nil {
@@ -861,7 +862,7 @@ func (c *Container) waitForStopped() error {
 	return backoff.Retry(op, b)
 }
 
-func (c *Container) createGoferProcess(spec *specs.Spec, conf *boot.Config, bundleDir string) ([]*os.File, *os.File, error) {
+func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bundleDir string, attached bool) ([]*os.File, *os.File, error) {
 	// Start with the general config flags.
 	args := conf.ToFlags()
 
@@ -954,6 +955,14 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *boot.Config, bund
 	cmd := exec.Command(binPath, args...)
 	cmd.ExtraFiles = goferEnds
 	cmd.Args[0] = "runsc-gofer"
+
+	if attached {
+		// The gofer is attached to the lifetime of this process, so it
+		// should synchronously die when this process dies.
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Pdeathsig: syscall.SIGKILL,
+		}
+	}
 
 	// Enter new namespaces to isolate from the rest of the system. Don't unshare
 	// cgroup because gofer is added to a cgroup in the caller's namespace.

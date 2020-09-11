@@ -15,6 +15,7 @@
 package overlay
 
 import (
+	"strings"
 	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
@@ -27,10 +28,15 @@ import (
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
+// _OVL_XATTR_PREFIX is an extended attribute key prefix to identify overlayfs
+// attributes.
+// Linux: fs/overlayfs/overlayfs.h:OVL_XATTR_PREFIX
+const _OVL_XATTR_PREFIX = linux.XATTR_TRUSTED_PREFIX + "overlay."
+
 // _OVL_XATTR_OPAQUE is an extended attribute key whose value is set to "y" for
 // opaque directories.
 // Linux: fs/overlayfs/overlayfs.h:OVL_XATTR_OPAQUE
-const _OVL_XATTR_OPAQUE = "trusted.overlay.opaque"
+const _OVL_XATTR_OPAQUE = _OVL_XATTR_PREFIX + "opaque"
 
 func isWhiteout(stat *linux.Statx) bool {
 	return stat.Mode&linux.S_IFMT == linux.S_IFCHR && stat.RdevMajor == 0 && stat.RdevMinor == 0
@@ -77,7 +83,7 @@ func putDentrySlice(ds *[]*dentry) {
 // but dentry slices are allocated lazily, and it's much easier to say "defer
 // fs.renameMuRUnlockAndCheckDrop(&ds)" than "defer func() {
 // fs.renameMuRUnlockAndCheckDrop(ds) }()" to work around this.
-func (fs *filesystem) renameMuRUnlockAndCheckDrop(ds **[]*dentry) {
+func (fs *filesystem) renameMuRUnlockAndCheckDrop(ctx context.Context, ds **[]*dentry) {
 	fs.renameMu.RUnlock()
 	if *ds == nil {
 		return
@@ -85,20 +91,20 @@ func (fs *filesystem) renameMuRUnlockAndCheckDrop(ds **[]*dentry) {
 	if len(**ds) != 0 {
 		fs.renameMu.Lock()
 		for _, d := range **ds {
-			d.checkDropLocked()
+			d.checkDropLocked(ctx)
 		}
 		fs.renameMu.Unlock()
 	}
 	putDentrySlice(*ds)
 }
 
-func (fs *filesystem) renameMuUnlockAndCheckDrop(ds **[]*dentry) {
+func (fs *filesystem) renameMuUnlockAndCheckDrop(ctx context.Context, ds **[]*dentry) {
 	if *ds == nil {
 		fs.renameMu.Unlock()
 		return
 	}
 	for _, d := range **ds {
-		d.checkDropLocked()
+		d.checkDropLocked(ctx)
 	}
 	fs.renameMu.Unlock()
 	putDentrySlice(*ds)
@@ -110,8 +116,10 @@ func (fs *filesystem) renameMuUnlockAndCheckDrop(ds **[]*dentry) {
 // Dentries which may have a reference count of zero, and which therefore
 // should be dropped once traversal is complete, are appended to ds.
 //
-// Preconditions: fs.renameMu must be locked. d.dirMu must be locked.
-// !rp.Done().
+// Preconditions:
+// * fs.renameMu must be locked.
+// * d.dirMu must be locked.
+// * !rp.Done().
 func (fs *filesystem) stepLocked(ctx context.Context, rp *vfs.ResolvingPath, d *dentry, mayFollowSymlinks bool, ds **[]*dentry) (*dentry, error) {
 	if !d.isDir() {
 		return nil, syserror.ENOTDIR
@@ -126,13 +134,13 @@ afterSymlink:
 		return d, nil
 	}
 	if name == ".." {
-		if isRoot, err := rp.CheckRoot(&d.vfsd); err != nil {
+		if isRoot, err := rp.CheckRoot(ctx, &d.vfsd); err != nil {
 			return nil, err
 		} else if isRoot || d.parent == nil {
 			rp.Advance()
 			return d, nil
 		}
-		if err := rp.CheckMount(&d.parent.vfsd); err != nil {
+		if err := rp.CheckMount(ctx, &d.parent.vfsd); err != nil {
 			return nil, err
 		}
 		rp.Advance()
@@ -142,7 +150,7 @@ afterSymlink:
 	if err != nil {
 		return nil, err
 	}
-	if err := rp.CheckMount(&child.vfsd); err != nil {
+	if err := rp.CheckMount(ctx, &child.vfsd); err != nil {
 		return nil, err
 	}
 	if child.isSymlink() && mayFollowSymlinks && rp.ShouldFollowSymlink() {
@@ -159,7 +167,9 @@ afterSymlink:
 	return child, nil
 }
 
-// Preconditions: fs.renameMu must be locked. d.dirMu must be locked.
+// Preconditions:
+// * fs.renameMu must be locked.
+// * d.dirMu must be locked.
 func (fs *filesystem) getChildLocked(ctx context.Context, parent *dentry, name string, ds **[]*dentry) (*dentry, error) {
 	if child, ok := parent.children[name]; ok {
 		return child, nil
@@ -177,7 +187,9 @@ func (fs *filesystem) getChildLocked(ctx context.Context, parent *dentry, name s
 	return child, nil
 }
 
-// Preconditions: fs.renameMu must be locked. parent.dirMu must be locked.
+// Preconditions:
+// * fs.renameMu must be locked.
+// * parent.dirMu must be locked.
 func (fs *filesystem) lookupLocked(ctx context.Context, parent *dentry, name string) (*dentry, error) {
 	childPath := fspath.Parse(name)
 	child := fs.newDentry()
@@ -199,6 +211,7 @@ func (fs *filesystem) lookupLocked(ctx context.Context, parent *dentry, name str
 			lookupErr = err
 			return false
 		}
+		defer childVD.DecRef(ctx)
 
 		mask := uint32(linux.STATX_TYPE)
 		if !existsOnAnyLayer {
@@ -237,6 +250,7 @@ func (fs *filesystem) lookupLocked(ctx context.Context, parent *dentry, name str
 		}
 
 		// Update child to include this layer.
+		childVD.IncRef()
 		if isUpper {
 			child.upperVD = childVD
 			child.copiedUp = 1
@@ -261,10 +275,10 @@ func (fs *filesystem) lookupLocked(ctx context.Context, parent *dentry, name str
 
 		// Directories are merged with directories from lower layers if they
 		// are not explicitly opaque.
-		opaqueVal, err := vfsObj.GetxattrAt(ctx, fs.creds, &vfs.PathOperation{
+		opaqueVal, err := vfsObj.GetXattrAt(ctx, fs.creds, &vfs.PathOperation{
 			Root:  childVD,
 			Start: childVD,
-		}, &vfs.GetxattrOptions{
+		}, &vfs.GetXattrOptions{
 			Name: _OVL_XATTR_OPAQUE,
 			Size: 1,
 		})
@@ -272,11 +286,11 @@ func (fs *filesystem) lookupLocked(ctx context.Context, parent *dentry, name str
 	})
 
 	if lookupErr != nil {
-		child.destroyLocked()
+		child.destroyLocked(ctx)
 		return nil, lookupErr
 	}
 	if !existsOnAnyLayer {
-		child.destroyLocked()
+		child.destroyLocked(ctx)
 		return nil, syserror.ENOENT
 	}
 
@@ -300,7 +314,9 @@ func (fs *filesystem) lookupLocked(ctx context.Context, parent *dentry, name str
 // lookupLayerLocked is similar to lookupLocked, but only returns information
 // about the file rather than a dentry.
 //
-// Preconditions: fs.renameMu must be locked. parent.dirMu must be locked.
+// Preconditions:
+// * fs.renameMu must be locked.
+// * parent.dirMu must be locked.
 func (fs *filesystem) lookupLayerLocked(ctx context.Context, parent *dentry, name string) (lookupLayer, error) {
 	childPath := fspath.Parse(name)
 	lookupLayer := lookupLayerNone
@@ -385,7 +401,9 @@ func (ll lookupLayer) existsInOverlay() bool {
 // rp.Start().Impl().(*dentry)). It does not check that the returned directory
 // is searchable by the provider of rp.
 //
-// Preconditions: fs.renameMu must be locked. !rp.Done().
+// Preconditions:
+// * fs.renameMu must be locked.
+// * !rp.Done().
 func (fs *filesystem) walkParentDirLocked(ctx context.Context, rp *vfs.ResolvingPath, d *dentry, ds **[]*dentry) (*dentry, error) {
 	for !rp.Final() {
 		d.dirMu.Lock()
@@ -425,12 +443,13 @@ func (fs *filesystem) resolveLocked(ctx context.Context, rp *vfs.ResolvingPath, 
 // doCreateAt checks that creating a file at rp is permitted, then invokes
 // create to do so.
 //
-// Preconditions: !rp.Done(). For the final path component in rp,
-// !rp.ShouldFollowSymlink().
+// Preconditions:
+// * !rp.Done().
+// * For the final path component in rp, !rp.ShouldFollowSymlink().
 func (fs *filesystem) doCreateAt(ctx context.Context, rp *vfs.ResolvingPath, dir bool, create func(parent *dentry, name string, haveUpperWhiteout bool) error) error {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	start := rp.Start().Impl().(*dentry)
 	parent, err := fs.walkParentDirLocked(ctx, rp, start, &ds)
 	if err != nil {
@@ -501,7 +520,7 @@ func (fs *filesystem) cleanupRecreateWhiteout(ctx context.Context, vfsObj *vfs.V
 func (fs *filesystem) AccessAt(ctx context.Context, rp *vfs.ResolvingPath, creds *auth.Credentials, ats vfs.AccessTypes) error {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return err
@@ -513,7 +532,7 @@ func (fs *filesystem) AccessAt(ctx context.Context, rp *vfs.ResolvingPath, creds
 func (fs *filesystem) BoundEndpointAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.BoundEndpointOptions) (transport.BoundEndpoint, error) {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return nil, err
@@ -532,7 +551,7 @@ func (fs *filesystem) BoundEndpointAt(ctx context.Context, rp *vfs.ResolvingPath
 func (fs *filesystem) GetDentryAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.GetDentryOptions) (*vfs.Dentry, error) {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return nil, err
@@ -553,7 +572,7 @@ func (fs *filesystem) GetDentryAt(ctx context.Context, rp *vfs.ResolvingPath, op
 func (fs *filesystem) GetParentDentryAt(ctx context.Context, rp *vfs.ResolvingPath) (*vfs.Dentry, error) {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	start := rp.Start().Impl().(*dentry)
 	d, err := fs.walkParentDirLocked(ctx, rp, start, &ds)
 	if err != nil {
@@ -654,7 +673,7 @@ func (fs *filesystem) MkdirAt(ctx context.Context, rp *vfs.ResolvingPath, opts v
 			// There may be directories on lower layers (previously hidden by
 			// the whiteout) that the new directory should not be merged with.
 			// Mark it opaque to prevent merging.
-			if err := vfsObj.SetxattrAt(ctx, fs.creds, &pop, &vfs.SetxattrOptions{
+			if err := vfsObj.SetXattrAt(ctx, fs.creds, &pop, &vfs.SetXattrOptions{
 				Name:  _OVL_XATTR_OPAQUE,
 				Value: "y",
 			}); err != nil {
@@ -717,17 +736,36 @@ func (fs *filesystem) MknodAt(ctx context.Context, rp *vfs.ResolvingPath, opts v
 func (fs *filesystem) OpenAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
 	mayCreate := opts.Flags&linux.O_CREAT != 0
 	mustCreate := opts.Flags&(linux.O_CREAT|linux.O_EXCL) == (linux.O_CREAT | linux.O_EXCL)
+	mayWrite := vfs.AccessTypesForOpenFlags(&opts).MayWrite()
 
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
+			unlocked = true
+		}
+	}
+	defer unlock()
 
 	start := rp.Start().Impl().(*dentry)
 	if rp.Done() {
+		if mayCreate && rp.MustBeDir() {
+			return nil, syserror.EISDIR
+		}
 		if mustCreate {
 			return nil, syserror.EEXIST
 		}
-		return start.openLocked(ctx, rp, &opts)
+		if mayWrite {
+			if err := start.copyUpLocked(ctx); err != nil {
+				return nil, err
+			}
+		}
+		start.IncRef()
+		defer start.DecRef(ctx)
+		unlock()
+		return start.openCopiedUp(ctx, rp, &opts)
 	}
 
 afterTrailingSymlink:
@@ -739,6 +777,10 @@ afterTrailingSymlink:
 	if err := parent.checkPermissions(rp.Credentials(), vfs.MayExec); err != nil {
 		return nil, err
 	}
+	// Reject attempts to open directories with O_CREAT.
+	if mayCreate && rp.MustBeDir() {
+		return nil, syserror.EISDIR
+	}
 	// Determine whether or not we need to create a file.
 	parent.dirMu.Lock()
 	child, err := fs.stepLocked(ctx, rp, parent, false /* mayFollowSymlinks */, &ds)
@@ -747,12 +789,11 @@ afterTrailingSymlink:
 		parent.dirMu.Unlock()
 		return fd, err
 	}
+	parent.dirMu.Unlock()
 	if err != nil {
-		parent.dirMu.Unlock()
 		return nil, err
 	}
 	// Open existing child or follow symlink.
-	parent.dirMu.Unlock()
 	if mustCreate {
 		return nil, syserror.EEXIST
 	}
@@ -767,19 +808,26 @@ afterTrailingSymlink:
 		start = parent
 		goto afterTrailingSymlink
 	}
-	return child.openLocked(ctx, rp, &opts)
+	if rp.MustBeDir() && !child.isDir() {
+		return nil, syserror.ENOTDIR
+	}
+	if mayWrite {
+		if err := child.copyUpLocked(ctx); err != nil {
+			return nil, err
+		}
+	}
+	child.IncRef()
+	defer child.DecRef(ctx)
+	unlock()
+	return child.openCopiedUp(ctx, rp, &opts)
 }
 
-// Preconditions: fs.renameMu must be locked.
-func (d *dentry) openLocked(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.OpenOptions) (*vfs.FileDescription, error) {
+// Preconditions: If vfs.AccessTypesForOpenFlags(opts).MayWrite(), then d has
+// been copied up.
+func (d *dentry) openCopiedUp(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.OpenOptions) (*vfs.FileDescription, error) {
 	ats := vfs.AccessTypesForOpenFlags(opts)
 	if err := d.checkPermissions(rp.Credentials(), ats); err != nil {
 		return nil, err
-	}
-	if ats.MayWrite() {
-		if err := d.copyUpLocked(ctx); err != nil {
-			return nil, err
-		}
 	}
 	mnt := rp.Mount()
 
@@ -792,7 +840,7 @@ func (d *dentry) openLocked(ctx context.Context, rp *vfs.ResolvingPath, opts *vf
 			return nil, syserror.EISDIR
 		}
 		// Can't open directories writably.
-		if ats&vfs.MayWrite != 0 {
+		if ats.MayWrite() {
 			return nil, syserror.EISDIR
 		}
 		if opts.Flags&linux.O_DIRECT != 0 {
@@ -825,14 +873,15 @@ func (d *dentry) openLocked(ctx context.Context, rp *vfs.ResolvingPath, opts *vf
 	fd.LockFD.Init(&d.locks)
 	layerFDOpts := layerFD.Options()
 	if err := fd.vfsfd.Init(fd, layerFlags, mnt, &d.vfsd, &layerFDOpts); err != nil {
-		layerFD.DecRef()
+		layerFD.DecRef(ctx)
 		return nil, err
 	}
 	return &fd.vfsfd, nil
 }
 
-// Preconditions: parent.dirMu must be locked. parent does not already contain
-// a child named rp.Component().
+// Preconditions:
+// * parent.dirMu must be locked.
+// * parent does not already contain a child named rp.Component().
 func (fs *filesystem) createAndOpenLocked(ctx context.Context, rp *vfs.ResolvingPath, parent *dentry, opts *vfs.OpenOptions, ds **[]*dentry) (*vfs.FileDescription, error) {
 	creds := rp.Credentials()
 	if err := parent.checkPermissions(creds, vfs.MayWrite); err != nil {
@@ -920,7 +969,7 @@ func (fs *filesystem) createAndOpenLocked(ctx context.Context, rp *vfs.Resolving
 	fd.LockFD.Init(&child.locks)
 	upperFDOpts := upperFD.Options()
 	if err := fd.vfsfd.Init(fd, upperFlags, mnt, &child.vfsd, &upperFDOpts); err != nil {
-		upperFD.DecRef()
+		upperFD.DecRef(ctx)
 		// Don't bother with cleanup; the file was created successfully, we
 		// just can't open it anymore for some reason.
 		return nil, err
@@ -932,7 +981,7 @@ func (fs *filesystem) createAndOpenLocked(ctx context.Context, rp *vfs.Resolving
 func (fs *filesystem) ReadlinkAt(ctx context.Context, rp *vfs.ResolvingPath) (string, error) {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return "", err
@@ -952,7 +1001,7 @@ func (fs *filesystem) RenameAt(ctx context.Context, rp *vfs.ResolvingPath, oldPa
 
 	var ds *[]*dentry
 	fs.renameMu.Lock()
-	defer fs.renameMuUnlockAndCheckDrop(&ds)
+	defer fs.renameMuUnlockAndCheckDrop(ctx, &ds)
 	newParent, err := fs.walkParentDirLocked(ctx, rp, rp.Start().Impl().(*dentry), &ds)
 	if err != nil {
 		return err
@@ -979,7 +1028,7 @@ func (fs *filesystem) RenameAt(ctx context.Context, rp *vfs.ResolvingPath, oldPa
 func (fs *filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	start := rp.Start().Impl().(*dentry)
 	parent, err := fs.walkParentDirLocked(ctx, rp, start, &ds)
 	if err != nil {
@@ -1001,7 +1050,7 @@ func (fs *filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 	}
 	vfsObj := rp.VirtualFilesystem()
 	mntns := vfs.MountNamespaceFromContext(ctx)
-	defer mntns.DecRef()
+	defer mntns.DecRef(ctx)
 	parent.dirMu.Lock()
 	defer parent.dirMu.Unlock()
 
@@ -1086,7 +1135,7 @@ func (fs *filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 		return err
 	}
 
-	vfsObj.CommitDeleteDentry(&child.vfsd)
+	vfsObj.CommitDeleteDentry(ctx, &child.vfsd)
 	delete(parent.children, name)
 	ds = appendDentry(ds, child)
 	parent.dirents = nil
@@ -1097,14 +1146,14 @@ func (fs *filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 func (fs *filesystem) SetStatAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.SetStatOptions) error {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return err
 	}
 
 	mode := linux.FileMode(atomic.LoadUint32(&d.mode))
-	if err := vfs.CheckSetStat(ctx, rp.Credentials(), &opts.Stat, mode, auth.KUID(atomic.LoadUint32(&d.uid)), auth.KGID(atomic.LoadUint32(&d.gid))); err != nil {
+	if err := vfs.CheckSetStat(ctx, rp.Credentials(), &opts, mode, auth.KUID(atomic.LoadUint32(&d.uid)), auth.KGID(atomic.LoadUint32(&d.gid))); err != nil {
 		return err
 	}
 	mnt := rp.Mount()
@@ -1132,7 +1181,7 @@ func (fs *filesystem) SetStatAt(ctx context.Context, rp *vfs.ResolvingPath, opts
 func (fs *filesystem) StatAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.StatOptions) (linux.Statx, error) {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return linux.Statx{}, err
@@ -1160,7 +1209,7 @@ func (fs *filesystem) StatAt(ctx context.Context, rp *vfs.ResolvingPath, opts vf
 func (fs *filesystem) StatFSAt(ctx context.Context, rp *vfs.ResolvingPath) (linux.Statfs, error) {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	_, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return linux.Statfs{}, err
@@ -1211,7 +1260,7 @@ func (fs *filesystem) SymlinkAt(ctx context.Context, rp *vfs.ResolvingPath, targ
 func (fs *filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
 	start := rp.Start().Impl().(*dentry)
 	parent, err := fs.walkParentDirLocked(ctx, rp, start, &ds)
 	if err != nil {
@@ -1233,7 +1282,7 @@ func (fs *filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error
 	}
 	vfsObj := rp.VirtualFilesystem()
 	mntns := vfs.MountNamespaceFromContext(ctx)
-	defer mntns.DecRef()
+	defer mntns.DecRef(ctx)
 	parent.dirMu.Lock()
 	defer parent.dirMu.Unlock()
 
@@ -1298,7 +1347,7 @@ func (fs *filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error
 	}
 
 	if child != nil {
-		vfsObj.CommitDeleteDentry(&child.vfsd)
+		vfsObj.CommitDeleteDentry(ctx, &child.vfsd)
 		delete(parent.children, name)
 		ds = appendDentry(ds, child)
 	}
@@ -1306,54 +1355,146 @@ func (fs *filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error
 	return nil
 }
 
-// ListxattrAt implements vfs.FilesystemImpl.ListxattrAt.
-func (fs *filesystem) ListxattrAt(ctx context.Context, rp *vfs.ResolvingPath, size uint64) ([]string, error) {
+// isOverlayXattr returns whether the given extended attribute configures the
+// overlay.
+func isOverlayXattr(name string) bool {
+	return strings.HasPrefix(name, _OVL_XATTR_PREFIX)
+}
+
+// ListXattrAt implements vfs.FilesystemImpl.ListXattrAt.
+func (fs *filesystem) ListXattrAt(ctx context.Context, rp *vfs.ResolvingPath, size uint64) ([]string, error) {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
-	_, err := fs.resolveLocked(ctx, rp, &ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
+	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return nil, err
 	}
-	// TODO(gvisor.dev/issue/1199): Linux overlayfs actually allows listxattr,
-	// but not any other xattr syscalls. For now we just reject all of them.
-	return nil, syserror.ENOTSUP
+
+	return fs.listXattr(ctx, d, size)
 }
 
-// GetxattrAt implements vfs.FilesystemImpl.GetxattrAt.
-func (fs *filesystem) GetxattrAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.GetxattrOptions) (string, error) {
+func (fs *filesystem) listXattr(ctx context.Context, d *dentry, size uint64) ([]string, error) {
+	vfsObj := d.fs.vfsfs.VirtualFilesystem()
+	top := d.topLayer()
+	names, err := vfsObj.ListXattrAt(ctx, fs.creds, &vfs.PathOperation{Root: top, Start: top}, size)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter out all overlay attributes.
+	n := 0
+	for _, name := range names {
+		if !isOverlayXattr(name) {
+			names[n] = name
+			n++
+		}
+	}
+	return names[:n], err
+}
+
+// GetXattrAt implements vfs.FilesystemImpl.GetXattrAt.
+func (fs *filesystem) GetXattrAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.GetXattrOptions) (string, error) {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
-	_, err := fs.resolveLocked(ctx, rp, &ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
+	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return "", err
 	}
-	return "", syserror.ENOTSUP
+
+	return fs.getXattr(ctx, d, rp.Credentials(), &opts)
 }
 
-// SetxattrAt implements vfs.FilesystemImpl.SetxattrAt.
-func (fs *filesystem) SetxattrAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.SetxattrOptions) error {
+func (fs *filesystem) getXattr(ctx context.Context, d *dentry, creds *auth.Credentials, opts *vfs.GetXattrOptions) (string, error) {
+	if err := d.checkXattrPermissions(creds, opts.Name, vfs.MayRead); err != nil {
+		return "", err
+	}
+
+	// Return EOPNOTSUPP when fetching an overlay attribute.
+	// See fs/overlayfs/super.c:ovl_own_xattr_get().
+	if isOverlayXattr(opts.Name) {
+		return "", syserror.EOPNOTSUPP
+	}
+
+	// Analogous to fs/overlayfs/super.c:ovl_other_xattr_get().
+	vfsObj := d.fs.vfsfs.VirtualFilesystem()
+	top := d.topLayer()
+	return vfsObj.GetXattrAt(ctx, fs.creds, &vfs.PathOperation{Root: top, Start: top}, opts)
+}
+
+// SetXattrAt implements vfs.FilesystemImpl.SetXattrAt.
+func (fs *filesystem) SetXattrAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.SetXattrOptions) error {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
-	_, err := fs.resolveLocked(ctx, rp, &ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
+	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return err
 	}
-	return syserror.ENOTSUP
+
+	return fs.setXattrLocked(ctx, d, rp.Mount(), rp.Credentials(), &opts)
 }
 
-// RemovexattrAt implements vfs.FilesystemImpl.RemovexattrAt.
-func (fs *filesystem) RemovexattrAt(ctx context.Context, rp *vfs.ResolvingPath, name string) error {
+// Precondition: fs.renameMu must be locked.
+func (fs *filesystem) setXattrLocked(ctx context.Context, d *dentry, mnt *vfs.Mount, creds *auth.Credentials, opts *vfs.SetXattrOptions) error {
+	if err := d.checkXattrPermissions(creds, opts.Name, vfs.MayWrite); err != nil {
+		return err
+	}
+
+	// Return EOPNOTSUPP when setting an overlay attribute.
+	// See fs/overlayfs/super.c:ovl_own_xattr_set().
+	if isOverlayXattr(opts.Name) {
+		return syserror.EOPNOTSUPP
+	}
+
+	// Analogous to fs/overlayfs/super.c:ovl_other_xattr_set().
+	if err := mnt.CheckBeginWrite(); err != nil {
+		return err
+	}
+	defer mnt.EndWrite()
+	if err := d.copyUpLocked(ctx); err != nil {
+		return err
+	}
+	vfsObj := d.fs.vfsfs.VirtualFilesystem()
+	return vfsObj.SetXattrAt(ctx, fs.creds, &vfs.PathOperation{Root: d.upperVD, Start: d.upperVD}, opts)
+}
+
+// RemoveXattrAt implements vfs.FilesystemImpl.RemoveXattrAt.
+func (fs *filesystem) RemoveXattrAt(ctx context.Context, rp *vfs.ResolvingPath, name string) error {
 	var ds *[]*dentry
 	fs.renameMu.RLock()
-	defer fs.renameMuRUnlockAndCheckDrop(&ds)
-	_, err := fs.resolveLocked(ctx, rp, &ds)
+	defer fs.renameMuRUnlockAndCheckDrop(ctx, &ds)
+	d, err := fs.resolveLocked(ctx, rp, &ds)
 	if err != nil {
 		return err
 	}
-	return syserror.ENOTSUP
+
+	return fs.removeXattrLocked(ctx, d, rp.Mount(), rp.Credentials(), name)
+}
+
+// Precondition: fs.renameMu must be locked.
+func (fs *filesystem) removeXattrLocked(ctx context.Context, d *dentry, mnt *vfs.Mount, creds *auth.Credentials, name string) error {
+	if err := d.checkXattrPermissions(creds, name, vfs.MayWrite); err != nil {
+		return err
+	}
+
+	// Like SetXattrAt, return EOPNOTSUPP when removing an overlay attribute.
+	// Linux passes the remove request to xattr_handler->set.
+	// See fs/xattr.c:vfs_removexattr().
+	if isOverlayXattr(name) {
+		return syserror.EOPNOTSUPP
+	}
+
+	if err := mnt.CheckBeginWrite(); err != nil {
+		return err
+	}
+	defer mnt.EndWrite()
+	if err := d.copyUpLocked(ctx); err != nil {
+		return err
+	}
+	vfsObj := d.fs.vfsfs.VirtualFilesystem()
+	return vfsObj.RemoveXattrAt(ctx, fs.creds, &vfs.PathOperation{Root: d.upperVD, Start: d.upperVD}, name)
 }
 
 // PrependPath implements vfs.FilesystemImpl.PrependPath.

@@ -68,7 +68,7 @@ func newSegment(r *stack.Route, id stack.TransportEndpointID, pkt *stack.PacketB
 		route:  r.Clone(),
 	}
 	s.data = pkt.Data.Clone(s.views[:])
-	s.hdr = header.TCP(pkt.TransportHeader)
+	s.hdr = header.TCP(pkt.TransportHeader().View())
 	s.rcvdTime = time.Now()
 	return s
 }
@@ -136,6 +136,12 @@ func (s *segment) logicalLen() seqnum.Size {
 		l++
 	}
 	return l
+}
+
+// segMemSize is the amount of memory used to hold the segment data and
+// the associated metadata.
+func (s *segment) segMemSize() int {
+	return segSize + s.data.Size()
 }
 
 // parse populates the sequence & ack numbers, flags, and window fields of the

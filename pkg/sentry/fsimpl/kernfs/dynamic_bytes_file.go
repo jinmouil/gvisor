@@ -35,6 +35,7 @@ import (
 // +stateify savable
 type DynamicBytesFile struct {
 	InodeAttrs
+	InodeNoStatFS
 	InodeNoopRefCount
 	InodeNotDirectory
 	InodeNotSymlink
@@ -101,12 +102,12 @@ func (fd *DynamicBytesFD) Seek(ctx context.Context, offset int64, whence int32) 
 	return fd.DynamicBytesFileDescriptionImpl.Seek(ctx, offset, whence)
 }
 
-// Read implmenets vfs.FileDescriptionImpl.Read.
+// Read implements vfs.FileDescriptionImpl.Read.
 func (fd *DynamicBytesFD) Read(ctx context.Context, dst usermem.IOSequence, opts vfs.ReadOptions) (int64, error) {
 	return fd.DynamicBytesFileDescriptionImpl.Read(ctx, dst, opts)
 }
 
-// PRead implmenets vfs.FileDescriptionImpl.PRead.
+// PRead implements vfs.FileDescriptionImpl.PRead.
 func (fd *DynamicBytesFD) PRead(ctx context.Context, dst usermem.IOSequence, offset int64, opts vfs.ReadOptions) (int64, error) {
 	return fd.DynamicBytesFileDescriptionImpl.PRead(ctx, dst, offset, opts)
 }
@@ -122,12 +123,12 @@ func (fd *DynamicBytesFD) PWrite(ctx context.Context, src usermem.IOSequence, of
 }
 
 // Release implements vfs.FileDescriptionImpl.Release.
-func (fd *DynamicBytesFD) Release() {}
+func (fd *DynamicBytesFD) Release(context.Context) {}
 
 // Stat implements vfs.FileDescriptionImpl.Stat.
 func (fd *DynamicBytesFD) Stat(ctx context.Context, opts vfs.StatOptions) (linux.Statx, error) {
 	fs := fd.vfsfd.VirtualDentry().Mount().Filesystem()
-	return fd.inode.Stat(fs, opts)
+	return fd.inode.Stat(ctx, fs, opts)
 }
 
 // SetStat implements vfs.FileDescriptionImpl.SetStat.

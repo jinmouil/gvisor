@@ -270,8 +270,23 @@ type regularFileFD struct {
 }
 
 // Release implements vfs.FileDescriptionImpl.Release.
-func (fd *regularFileFD) Release() {
+func (fd *regularFileFD) Release(context.Context) {
 	// noop
+}
+
+// Allocate implements vfs.FileDescriptionImpl.Allocate.
+func (fd *regularFileFD) Allocate(ctx context.Context, mode, offset, length uint64) error {
+	f := fd.inode().impl.(*regularFile)
+
+	f.inode.mu.Lock()
+	defer f.inode.mu.Unlock()
+	oldSize := f.size
+	size := offset + length
+	if oldSize >= size {
+		return nil
+	}
+	_, err := f.truncateLocked(size)
+	return err
 }
 
 // PRead implements vfs.FileDescriptionImpl.PRead.
@@ -280,8 +295,11 @@ func (fd *regularFileFD) PRead(ctx context.Context, dst usermem.IOSequence, offs
 		return 0, syserror.EINVAL
 	}
 
-	// Check that flags are supported. Silently ignore RWF_HIPRI.
-	if opts.Flags&^linux.RWF_HIPRI != 0 {
+	// Check that flags are supported. RWF_DSYNC/RWF_SYNC can be ignored since
+	// all state is in-memory.
+	//
+	// TODO(gvisor.dev/issue/2601): Support select preadv2 flags.
+	if opts.Flags&^(linux.RWF_HIPRI|linux.RWF_DSYNC|linux.RWF_SYNC) != 0 {
 		return 0, syserror.EOPNOTSUPP
 	}
 
@@ -307,46 +325,60 @@ func (fd *regularFileFD) Read(ctx context.Context, dst usermem.IOSequence, opts 
 
 // PWrite implements vfs.FileDescriptionImpl.PWrite.
 func (fd *regularFileFD) PWrite(ctx context.Context, src usermem.IOSequence, offset int64, opts vfs.WriteOptions) (int64, error) {
+	n, _, err := fd.pwrite(ctx, src, offset, opts)
+	return n, err
+}
+
+// pwrite returns the number of bytes written, final offset and error. The
+// final offset should be ignored by PWrite.
+func (fd *regularFileFD) pwrite(ctx context.Context, src usermem.IOSequence, offset int64, opts vfs.WriteOptions) (written, finalOff int64, err error) {
 	if offset < 0 {
-		return 0, syserror.EINVAL
+		return 0, offset, syserror.EINVAL
 	}
 
-	// Check that flags are supported. Silently ignore RWF_HIPRI.
-	if opts.Flags&^linux.RWF_HIPRI != 0 {
-		return 0, syserror.EOPNOTSUPP
+	// Check that flags are supported. RWF_DSYNC/RWF_SYNC can be ignored since
+	// all state is in-memory.
+	//
+	// TODO(gvisor.dev/issue/2601): Support select preadv2 flags.
+	if opts.Flags&^(linux.RWF_HIPRI|linux.RWF_DSYNC|linux.RWF_SYNC) != 0 {
+		return 0, offset, syserror.EOPNOTSUPP
 	}
 
 	srclen := src.NumBytes()
 	if srclen == 0 {
-		return 0, nil
+		return 0, offset, nil
 	}
 	f := fd.inode().impl.(*regularFile)
+	f.inode.mu.Lock()
+	defer f.inode.mu.Unlock()
+	// If the file is opened with O_APPEND, update offset to file size.
+	if fd.vfsfd.StatusFlags()&linux.O_APPEND != 0 {
+		// Locking f.inode.mu is sufficient for reading f.size.
+		offset = int64(f.size)
+	}
 	if end := offset + srclen; end < offset {
 		// Overflow.
-		return 0, syserror.EINVAL
+		return 0, offset, syserror.EINVAL
 	}
 
-	var err error
 	srclen, err = vfs.CheckLimit(ctx, offset, srclen)
 	if err != nil {
-		return 0, err
+		return 0, offset, err
 	}
 	src = src.TakeFirst64(srclen)
 
-	f.inode.mu.Lock()
 	rw := getRegularFileReadWriter(f, offset)
 	n, err := src.CopyInTo(ctx, rw)
-	fd.inode().touchCMtimeLocked()
-	f.inode.mu.Unlock()
+	f.inode.touchCMtimeLocked()
 	putRegularFileReadWriter(rw)
-	return n, err
+	return n, n + offset, err
 }
 
 // Write implements vfs.FileDescriptionImpl.Write.
 func (fd *regularFileFD) Write(ctx context.Context, src usermem.IOSequence, opts vfs.WriteOptions) (int64, error) {
 	fd.offMu.Lock()
-	n, err := fd.PWrite(ctx, src, fd.off, opts)
-	fd.off += n
+	n, off, err := fd.pwrite(ctx, src, fd.off, opts)
+	fd.off = off
 	fd.offMu.Unlock()
 	return n, err
 }

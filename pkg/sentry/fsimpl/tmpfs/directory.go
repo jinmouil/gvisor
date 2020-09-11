@@ -57,8 +57,9 @@ func (fs *filesystem) newDirectory(kuid auth.KUID, kgid auth.KGID, mode linux.Fi
 	return dir
 }
 
-// Preconditions: filesystem.mu must be locked for writing. dir must not
-// already contain a child with the given name.
+// Preconditions:
+// * filesystem.mu must be locked for writing.
+// * dir must not already contain a child with the given name.
 func (dir *directory) insertChildLocked(child *dentry, name string) {
 	child.parent = &dir.dentry
 	child.name = name
@@ -79,7 +80,10 @@ func (dir *directory) removeChildLocked(child *dentry) {
 	dir.iterMu.Lock()
 	dir.childList.Remove(child)
 	dir.iterMu.Unlock()
-	child.unlinked = true
+}
+
+func (dir *directory) mayDelete(creds *auth.Credentials, child *dentry) error {
+	return vfs.CheckDeleteSticky(creds, linux.FileMode(atomic.LoadUint32(&dir.inode.mode)), auth.KUID(atomic.LoadUint32(&child.inode.uid)))
 }
 
 type directoryFD struct {
@@ -92,7 +96,7 @@ type directoryFD struct {
 }
 
 // Release implements vfs.FileDescriptionImpl.Release.
-func (fd *directoryFD) Release() {
+func (fd *directoryFD) Release(ctx context.Context) {
 	if fd.iter != nil {
 		dir := fd.inode().impl.(*directory)
 		dir.iterMu.Lock()
@@ -107,13 +111,14 @@ func (fd *directoryFD) IterDirents(ctx context.Context, cb vfs.IterDirentsCallba
 	fs := fd.filesystem()
 	dir := fd.inode().impl.(*directory)
 
+	defer fd.dentry().InotifyWithParent(ctx, linux.IN_ACCESS, 0, vfs.PathEvent)
+
 	// fs.mu is required to read d.parent and dentry.name.
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 	dir.iterMu.Lock()
 	defer dir.iterMu.Unlock()
 
-	fd.dentry().InotifyWithParent(linux.IN_ACCESS, 0, vfs.PathEvent)
 	fd.inode().touchAtime(fd.vfsfd.Mount())
 
 	if fd.off == 0 {

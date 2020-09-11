@@ -27,7 +27,6 @@ import (
 	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/rand"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fsbridge"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
@@ -78,22 +77,6 @@ type LoadArgs struct {
 
 	// Features specifies the CPU feature set for the executable.
 	Features *cpuid.FeatureSet
-}
-
-// readFull behaves like io.ReadFull for an *fs.File.
-func readFull(ctx context.Context, f *fs.File, dst usermem.IOSequence, offset int64) (int64, error) {
-	var total int64
-	for dst.NumBytes() > 0 {
-		n, err := f.Preadv(ctx, dst, offset+total)
-		total += n
-		if err == io.EOF && total != 0 {
-			return total, io.ErrUnexpectedEOF
-		} else if err != nil {
-			return total, err
-		}
-		dst = dst.DropFirst64(n)
-	}
-	return total, nil
 }
 
 // openPath opens args.Filename and checks that it is valid for loading.
@@ -171,7 +154,7 @@ func loadExecutable(ctx context.Context, args LoadArgs) (loadedELF, arch.Context
 				return loadedELF{}, nil, nil, nil, err
 			}
 			// Ensure file is release in case the code loops or errors out.
-			defer args.File.DecRef()
+			defer args.File.DecRef(ctx)
 		} else {
 			if err := checkIsRegularFile(ctx, args.File, args.Filename); err != nil {
 				return loadedELF{}, nil, nil, nil, err
@@ -232,20 +215,20 @@ func loadExecutable(ctx context.Context, args LoadArgs) (loadedELF, arch.Context
 // path and argv.
 //
 // Preconditions:
-//  * The Task MemoryManager is empty.
-//  * Load is called on the Task goroutine.
+// * The Task MemoryManager is empty.
+// * Load is called on the Task goroutine.
 func Load(ctx context.Context, args LoadArgs, extraAuxv []arch.AuxEntry, vdso *VDSO) (abi.OS, arch.Context, string, *syserr.Error) {
 	// Load the executable itself.
 	loaded, ac, file, newArgv, err := loadExecutable(ctx, args)
 	if err != nil {
-		return 0, nil, "", syserr.NewDynamic(fmt.Sprintf("Failed to load %s: %v", args.Filename, err), syserr.FromError(err).ToLinux())
+		return 0, nil, "", syserr.NewDynamic(fmt.Sprintf("failed to load %s: %v", args.Filename, err), syserr.FromError(err).ToLinux())
 	}
-	defer file.DecRef()
+	defer file.DecRef(ctx)
 
 	// Load the VDSO.
 	vdsoAddr, err := loadVDSO(ctx, args.MemoryManager, vdso, loaded)
 	if err != nil {
-		return 0, nil, "", syserr.NewDynamic(fmt.Sprintf("Error loading VDSO: %v", err), syserr.FromError(err).ToLinux())
+		return 0, nil, "", syserr.NewDynamic(fmt.Sprintf("error loading VDSO: %v", err), syserr.FromError(err).ToLinux())
 	}
 
 	// Setup the heap. brk starts at the next page after the end of the
@@ -309,7 +292,7 @@ func Load(ctx context.Context, args LoadArgs, extraAuxv []arch.AuxEntry, vdso *V
 	m.SetEnvvStart(sl.EnvvStart)
 	m.SetEnvvEnd(sl.EnvvEnd)
 	m.SetAuxv(auxv)
-	m.SetExecutable(file)
+	m.SetExecutable(ctx, file)
 
 	symbolValue, err := getSymbolValueFromVDSO("rt_sigreturn")
 	if err != nil {

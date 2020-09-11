@@ -66,7 +66,7 @@ func (s *sigSetWithSize) CopyOutN(task marshal.Task, addr usermem.Addr, limit in
     length, err := task.CopyOutBytes(addr, buf[:limit]) // escapes: okay.
     // Since we bypassed the compiler's escape analysis, indicate that s
     // must live until the use above.
-    runtime.KeepAlive(s)
+    runtime.KeepAlive(s) // escapes: replaced by intrinsic.
     return length, err
 }
 
@@ -89,12 +89,12 @@ func (s *sigSetWithSize) CopyIn(task marshal.Task, addr usermem.Addr) (int, erro
     length, err := task.CopyInBytes(addr, buf) // escapes: okay.
     // Since we bypassed the compiler's escape analysis, indicate that s
     // must live until the use above.
-    runtime.KeepAlive(s)
+    runtime.KeepAlive(s) // escapes: replaced by intrinsic.
     return length, err
 }
 
 // WriteTo implements io.WriterTo.WriteTo.
-func (s *sigSetWithSize) WriteTo(w io.Writer) (int64, error) {
+func (s *sigSetWithSize) WriteTo(writer io.Writer) (int64, error) {
     // Construct a slice backed by dst's underlying memory.
     var buf []byte
     hdr := (*reflect.SliceHeader)(unsafe.Pointer(&buf))
@@ -102,10 +102,10 @@ func (s *sigSetWithSize) WriteTo(w io.Writer) (int64, error) {
     hdr.Len = s.SizeBytes()
     hdr.Cap = s.SizeBytes()
 
-    length, err := w.Write(buf)
+    length, err := writer.Write(buf)
     // Since we bypassed the compiler's escape analysis, indicate that s
     // must live until the use above.
-    runtime.KeepAlive(s)
+    runtime.KeepAlive(s) // escapes: replaced by intrinsic.
     return int64(length), err
 }
 
